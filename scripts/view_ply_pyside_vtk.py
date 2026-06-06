@@ -200,6 +200,7 @@ class PlyViewer(QMainWindow):
         self.current_file: Path | None = None
         self.current_cloud: LoadedPly | None = None
         self._threads: list[QThread] = []
+        self._workers: list[QObject] = []
 
         self.file_list = QListWidget()
         self.file_list.itemDoubleClicked.connect(self.open_list_item)
@@ -324,20 +325,22 @@ class PlyViewer(QMainWindow):
 
     def start_worker(self, worker: QObject) -> None:
         thread = QThread(self)
+        self._threads.append(thread)
+        self._workers.append(worker)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)  # type: ignore[attr-defined]
         worker.finished.connect(thread.quit)  # type: ignore[attr-defined]
         worker.failed.connect(thread.quit)  # type: ignore[attr-defined]
-        worker.finished.connect(worker.deleteLater)  # type: ignore[attr-defined]
-        worker.failed.connect(worker.deleteLater)  # type: ignore[attr-defined]
-        thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: self._forget_thread(thread))
-        self._threads.append(thread)
+        thread.finished.connect(lambda thread=thread, worker=worker: self._on_worker_thread_finished(thread, worker))
         thread.start()
 
-    def _forget_thread(self, thread: QThread) -> None:
+    def _on_worker_thread_finished(self, thread: QThread, worker: QObject) -> None:
         if thread in self._threads:
             self._threads.remove(thread)
+        if worker in self._workers:
+            self._workers.remove(worker)
+        worker.deleteLater()
+        thread.deleteLater()
 
     @Slot(int, object)
     def on_ply_loaded(self, token: int, loaded: object) -> None:
@@ -364,6 +367,7 @@ class PlyViewer(QMainWindow):
         for thread in list(self._threads):
             thread.quit()
             thread.wait(1000)
+        self._workers.clear()
         super().closeEvent(event)
 
 
