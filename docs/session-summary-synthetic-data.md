@@ -518,6 +518,7 @@ Current environment:
 
 ```text
 torch 2.12.0+cu126
+pytorch3d 0.7.9
 pyyaml 6.0.3
 tqdm 4.67.3
 scikit-learn 1.8.0
@@ -533,7 +534,7 @@ torch CUDA runtime: 12.6
 torch arch list includes: sm_61
 ```
 
-The MX150 has only 2GB VRAM, so start with `batch_size=1` and reduced/debug point counts. Full 16384-point training may run out of memory.
+The MX150 has only 2GB VRAM, so start with `batch_size=1` and reduced/debug point counts when changing the model. Full 16384-point training fits with the current `pytorch3d` ops backend.
 
 Runtime smoke tests passed:
 
@@ -613,6 +614,45 @@ confusion_matrix=[[45789,83],[155,85045]]
 ```
 
 This is the first meaningful PointNet++ semantic segmentation baseline. It passes the synthetic validation target by a wide margin, but PLY previews still need human visual inspection and test evaluation before sign-off.
+
+PointNet++ ops optimization:
+
+```text
+default ops backend: pytorch3d
+fallback ops backend: pure_torch
+config: configs/train/pointnet2_semseg_k41144.yaml
+profile output: experiments/pointnet2_profile_pytorch3d_backend/
+```
+
+PyTorch3D backend check:
+
+```text
+pytorch3d._C available
+CUDA forward/backward with pytorch3d backend: pass
+train smoke with config backend=pytorch3d: pass
+```
+
+Profiler result on `processed-data/pointnet2_semseg_k41144`, 16384 points, batch size 1:
+
+```text
+pure_torch mean_seconds_per_batch=0.8340
+pytorch3d mean_seconds_per_batch=0.1143
+speedup: about 7.3x for the profiled training batch
+```
+
+PyTorch3D batch-size probe:
+
+```text
+batch_size=2 mean_seconds_per_batch=0.1872, max_reserved_mib=288.0
+batch_size=4 mean_seconds_per_batch=0.4654, max_reserved_mib=572.0
+```
+
+Interpretation:
+
+- Use `pytorch3d` for normal training on the current machine.
+- Batch size 2 or 4 now fits on MX150 for the profiled config.
+- Keep `pure_torch` for debugging and machines without PyTorch3D.
+- Do not build a custom extension yet; tune batch size, DataLoader, and metric synchronization first.
 
 ### For PPRNet++-Style Training
 

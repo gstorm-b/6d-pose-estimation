@@ -25,6 +25,7 @@ model:
   name: pointnet2_semseg
   num_classes: 2
   input_features: xyz_normal
+  ops_backend: pytorch3d
   sa_npoints: [1024, 256, 64]
   sa_nsamples: [32, 32, 32]
   dropout: 0.4

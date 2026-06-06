@@ -1,11 +1,11 @@
-"""Pure-PyTorch PointNet++ semantic segmentation MVP."""
+"""PointNet++ semantic segmentation MVP."""
 
 from __future__ import annotations
 
 import torch
 from torch import nn
 
-from .pointnet2_ops import farthest_point_sample, index_points, knn_indices, three_nn_interpolate
+from .pointnet2_ops import PointNet2Ops, build_pointnet2_ops_backend, index_points
 
 
 class SharedMlp2d(nn.Sequential):
@@ -34,10 +34,18 @@ class SharedMlp1d(nn.Sequential):
 
 
 class SetAbstraction(nn.Module):
-    def __init__(self, npoint: int, nsample: int, in_channels: int, mlp_channels: list[int]) -> None:
+    def __init__(
+        self,
+        npoint: int,
+        nsample: int,
+        in_channels: int,
+        mlp_channels: list[int],
+        ops_backend: PointNet2Ops,
+    ) -> None:
         super().__init__()
         self.npoint = npoint
         self.nsample = nsample
+        self.ops_backend = ops_backend
         self.mlp = SharedMlp2d([in_channels, *mlp_channels])
 
     def forward(
@@ -45,9 +53,9 @@ class SetAbstraction(nn.Module):
         xyz: torch.Tensor,
         features: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        fps_indices = farthest_point_sample(xyz, self.npoint)
+        fps_indices = self.ops_backend.farthest_point_sample(xyz, self.npoint)
         new_xyz = index_points(xyz, fps_indices)
-        group_indices = knn_indices(self.nsample, xyz, new_xyz)
+        group_indices = self.ops_backend.knn_indices(self.nsample, xyz, new_xyz)
         grouped_xyz = index_points(xyz, group_indices)
         grouped_xyz_norm = grouped_xyz - new_xyz.unsqueeze(2)
 
@@ -64,8 +72,9 @@ class SetAbstraction(nn.Module):
 
 
 class FeaturePropagation(nn.Module):
-    def __init__(self, in_channels: int, mlp_channels: list[int]) -> None:
+    def __init__(self, in_channels: int, mlp_channels: list[int], ops_backend: PointNet2Ops) -> None:
         super().__init__()
+        self.ops_backend = ops_backend
         self.mlp = SharedMlp1d([in_channels, *mlp_channels])
 
     def forward(
@@ -75,7 +84,7 @@ class FeaturePropagation(nn.Module):
         target_features: torch.Tensor | None,
         source_features: torch.Tensor,
     ) -> torch.Tensor:
-        interpolated = three_nn_interpolate(source_xyz, target_xyz, source_features)
+        interpolated = self.ops_backend.three_nn_interpolate(source_xyz, target_xyz, source_features)
         if target_features is not None:
             interpolated = torch.cat([target_features, interpolated], dim=1)
         return self.mlp(interpolated)
@@ -91,6 +100,7 @@ class PointNet2SemSeg(nn.Module):
         sa_npoints: tuple[int, int, int] = (4096, 1024, 256),
         sa_nsamples: tuple[int, int, int] = (32, 32, 32),
         dropout: float = 0.4,
+        ops_backend: str = "pure_torch",
     ) -> None:
         super().__init__()
         if input_channels < 3:
@@ -98,14 +108,16 @@ class PointNet2SemSeg(nn.Module):
         extra_channels = input_channels - 3
         self.num_classes = num_classes
         self.input_channels = input_channels
+        self.ops_backend = build_pointnet2_ops_backend(ops_backend)
+        self.ops_backend_name = self.ops_backend.name
 
-        self.sa1 = SetAbstraction(sa_npoints[0], sa_nsamples[0], 3 + extra_channels, [64, 64, 64])
-        self.sa2 = SetAbstraction(sa_npoints[1], sa_nsamples[1], 3 + 64, [128, 128, 128])
-        self.sa3 = SetAbstraction(sa_npoints[2], sa_nsamples[2], 3 + 128, [256, 256, 256])
+        self.sa1 = SetAbstraction(sa_npoints[0], sa_nsamples[0], 3 + extra_channels, [64, 64, 64], self.ops_backend)
+        self.sa2 = SetAbstraction(sa_npoints[1], sa_nsamples[1], 3 + 64, [128, 128, 128], self.ops_backend)
+        self.sa3 = SetAbstraction(sa_npoints[2], sa_nsamples[2], 3 + 128, [256, 256, 256], self.ops_backend)
 
-        self.fp3 = FeaturePropagation(128 + 256, [256, 128])
-        self.fp2 = FeaturePropagation(64 + 128, [128, 64])
-        self.fp1 = FeaturePropagation(extra_channels + 64, [64, 64])
+        self.fp3 = FeaturePropagation(128 + 256, [256, 128], self.ops_backend)
+        self.fp2 = FeaturePropagation(64 + 128, [128, 64], self.ops_backend)
+        self.fp1 = FeaturePropagation(extra_channels + 64, [64, 64], self.ops_backend)
 
         self.classifier = nn.Sequential(
             nn.Conv1d(64, 64, kernel_size=1, bias=False),
@@ -144,4 +156,5 @@ def build_pointnet2_semseg_from_config(config: dict) -> PointNet2SemSeg:
         sa_npoints=tuple(model_config.get("sa_npoints", [4096, 1024, 256])),
         sa_nsamples=tuple(model_config.get("sa_nsamples", [32, 32, 32])),
         dropout=float(model_config.get("dropout", 0.4)),
+        ops_backend=str(model_config.get("ops_backend", "pure_torch")),
     )

@@ -76,6 +76,7 @@ Use:
 ```text
 Python
 PyTorch
+PyTorch3D point-cloud ops, optional optimized backend
 NumPy
 tqdm
 PyYAML
@@ -86,33 +87,34 @@ matplotlib
 Rationale:
 
 - PyTorch is the stable training foundation.
-- A pure-PyTorch PointNet++ MVP is easier to debug on Windows.
-- It avoids blocking the project on CUDA extension compatibility.
+- A pure-PyTorch PointNet++ backend remains available for debugging and fallback.
+- PyTorch3D is now the preferred backend on the current machine because its compiled CUDA point-cloud ops are installed and verified.
 - Dataset and training code stay readable while the data format is still evolving.
 
 ### Optional Stack For Later Optimization
 
-Consider PyTorch Geometric later, not as an MVP dependency.
+Consider PyTorch Geometric or custom CUDA/Triton kernels later, not as current dependencies.
 
 Reason:
 
 - PyG provides useful point-cloud and graph primitives, but optional extension packages must match the installed PyTorch and CUDA versions.
 - This is powerful but adds installation friction, especially on Windows.
-- If pure-PyTorch sampling/grouping becomes too slow, revisit PyG or custom CUDA ops after the dataset and training target are stable.
+- PyTorch3D already removes the largest current bottleneck in farthest point sampling.
+- Custom kernels should be considered only if PyTorch3D remains too slow after batch-size/DataLoader tuning.
 
-### Do Not Use For MVP
+### Do Not Make Mandatory Yet
 
 Avoid making these mandatory at first:
 
 ```text
-pytorch3d
 torch-points-kernels
 third-party pointnet2 CUDA forks
 ```
 
 Reason:
 
-- They can be useful later, but they increase install/debug risk before we have a stable processed dataset and baseline metrics.
+- They can be useful later, but they increase install/debug risk before a pose-estimation target is stable.
+- PyTorch3D is used by config when available, with `pure_torch` fallback to keep the project runnable on machines without PyTorch3D.
 
 ## Environment Plan
 
@@ -160,7 +162,7 @@ Current hardware caution:
 
 - GPU is `NVIDIA GeForce MX150` with 2GB VRAM.
 - Prefer `--batch-size 1` for CUDA experiments.
-- Full `16384`-point samples may run out of memory with the current pure-PyTorch grouping implementation.
+- Full `16384`-point samples fit with the current PyTorch3D backend and batch size 1.
 - If CUDA OOM occurs, create a reduced processed dataset with `4096` or `8192` points and keep the full dataset for final baselines.
 
 ## Data Design
@@ -328,6 +330,7 @@ Initial model scale:
 num_classes: 2
 input_channels: 3 if xyz only
 input_channels: 6 if xyz + normals
+ops_backend: pytorch3d if available, pure_torch fallback
 sa_npoints: [4096, 1024, 256]
 sa_radii: [0.015, 0.035, 0.075]
 sa_nsamples: [32, 32, 32]
@@ -343,24 +346,40 @@ approx object size: 0.030 m x 0.0936 m x 0.020 m
 
 ### Implementation Choice For PointNet++ Ops
 
-For MVP, implement grouping in PyTorch:
+The model supports two PointNet++ operation backends:
+
+```text
+pure_torch: readable fallback implementation
+pytorch3d: optimized CUDA-backed FPS/KNN/gather/interpolation path
+```
+
+The current default is:
+
+```yaml
+model:
+  ops_backend: pytorch3d
+```
+
+Backend responsibilities:
 
 - Farthest point sampling.
-- Ball query or k-nearest-neighbor grouping.
+- k-nearest-neighbor grouping.
 - Local PointNet MLP over grouped points.
 - Three-nearest interpolation for feature propagation.
 
 Implementation notes:
 
-- Pure PyTorch will be slower than CUDA kernels.
+- PyTorch3D is the default backend when available.
+- Pure PyTorch remains slower but useful as a readable fallback.
 - Keep `num_points=16384` as target, but allow smaller debug configs like `4096`.
 - Add small tests for tensor shapes before long training.
 
-If pure PyTorch is too slow:
+If PyTorch3D is still too slow:
 
-1. Try PyG with matching Torch/CUDA wheels.
-2. Replace only sampling/grouping ops.
-3. Keep dataset, model API, training loop unchanged.
+1. Tune batch size, DataLoader workers, pinned memory, and metric synchronization.
+2. Try PyG with matching Torch/CUDA wheels.
+3. Replace only sampling/grouping ops or add a fused custom kernel.
+4. Keep dataset, model API, training loop unchanged.
 
 ## Training Design
 
@@ -432,6 +451,7 @@ model:
   name: pointnet2_semseg
   num_classes: 2
   input_features: xyz_normal
+  ops_backend: pytorch3d
   sa_npoints: [4096, 1024, 256]
   sa_radii: [0.015, 0.035, 0.075]
   sa_nsamples: [32, 32, 32]
@@ -1130,6 +1150,90 @@ Interpretation:
 - The full-style config `sa_npoints=[4096,1024,256]` also fits, but it is much slower and should not be the first long baseline on this GPU.
 - Use `4096` for rapid iteration, `8192` as a middle ground, and `16384` with current config for the first stronger synthetic baseline.
 
+### Phase 7b: PyTorch3D Ops Backend Optimization
+
+Status: Done.
+
+Reason:
+
+- GPU utilization was low during Phase 8 because the pure-PyTorch farthest-point-sampling loop launched many small kernels with `batch_size=1`.
+- PyTorch3D was installed into the current Python environment and provides compiled CUDA point-cloud ops.
+
+Implementation changes:
+
+```text
+src/models/pointnet2_ops.py
+  pure_torch backend
+  pytorch3d backend
+  fallback builder
+
+src/models/pointnet2_semseg.py
+  model.ops_backend config support
+
+configs/train/pointnet2_semseg_k41144.yaml
+  model.ops_backend: pytorch3d
+```
+
+Environment check:
+
+```text
+torch=2.12.0+cu126
+pytorch3d=0.7.9
+pytorch3d._C available
+GPU=NVIDIA GeForce MX150
+```
+
+Micro-benchmark:
+
+```text
+current_fps_1024: 0.4284 s
+pytorch3d_fps_1024: 0.0211 s
+```
+
+End-to-end profiler on `processed-data/pointnet2_semseg_k41144`, `16384` points, `batch_size=1`, `sa_npoints=[1024,256,64]`, `sa_nsamples=[32,32,32]`:
+
+```text
+pure_torch:
+  mean_seconds_per_batch=0.8340
+  max_allocated_mib=199.9
+  max_reserved_mib=228.0
+
+pytorch3d:
+  mean_seconds_per_batch=0.1143
+  max_allocated_mib=135.7
+  max_reserved_mib=158.0
+```
+
+PyTorch3D batch-size probe:
+
+```text
+batch_size=2:
+  mean_seconds_per_batch=0.1872
+  max_allocated_mib=265.7
+  max_reserved_mib=288.0
+
+batch_size=4:
+  mean_seconds_per_batch=0.4654
+  max_allocated_mib=527.1
+  max_reserved_mib=572.0
+```
+
+Validation checks:
+
+```text
+CUDA forward/backward with pytorch3d backend: pass
+train smoke with config backend=pytorch3d: pass
+config saved ops_backend=pytorch3d and ops_backend_effective=pytorch3d
+```
+
+Interpretation:
+
+- The PyTorch3D backend is about 7x faster for the profiled training batch and uses less reserved GPU memory.
+- Prefer `pytorch3d` for training on the current machine.
+- `batch_size=2` or `batch_size=4` now fit on MX150 with the profiled config; use short validation runs before committing to long training.
+- Keep `pure_torch` as the fallback/debug backend for machines without PyTorch3D.
+- Custom extensions are not justified yet; first tune batch size, DataLoader, and metric synchronization on top of PyTorch3D.
+
 ### Phase 8: Full Synthetic Baseline
 
 Status: Done.
@@ -1308,11 +1412,13 @@ Implement these in order:
 device: CUDA by default, CPU fallback
 gpu: NVIDIA GeForce MX150, 2GB VRAM
 torch: 2.12.0+cu126
+pytorch3d: 0.7.9 available in current environment
 dataset: synthetic-data/K41144 validated raw data
 processed baseline: processed-data/pointnet2_semseg_k41144
 debug_num_points: 4096
 baseline_num_points: 16384 if memory allows, otherwise 4096 or 8192
 input_features: xyz + normal_camera
+ops_backend: pytorch3d by default, pure_torch fallback
 first task target: semantic segmentation, not pose estimation
 ```
 
@@ -1331,17 +1437,18 @@ Mitigation:
 - Keep `batch_size=1`.
 - Reduce `sa_npoints` and `sa_nsamples`.
 
-### Pure PyTorch PointNet++ May Be Slow
+### PointNet++ Ops May Still Bottleneck Training
 
 Risk:
 
-- FPS/kNN/grouping may be slow compared with CUDA extensions.
+- FPS/kNN/grouping can still limit throughput, even with PyTorch3D, because PointNet++ uses indexing-heavy point-cloud ops rather than large matrix multiplies.
 
 Mitigation:
 
-- Keep current implementation for correctness.
-- Profile after the model learns.
-- Swap only `pointnet2_ops.py` later if needed.
+- Use the PyTorch3D backend by default.
+- Keep `pure_torch` for correctness checks and fallback.
+- Tune batch size, DataLoader workers, pinned memory, and metric synchronization.
+- Add custom fused kernels only if PyTorch3D remains too slow after simpler tuning.
 
 ### Model May Collapse To Background
 

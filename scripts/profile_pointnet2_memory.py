@@ -33,6 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-batches", type=int, default=2)
     parser.add_argument("--sa-npoints", help="Override Set Abstraction npoints, e.g. 1024,256,64.")
     parser.add_argument("--sa-nsamples", help="Override Set Abstraction nsamples, e.g. 32,32,32.")
+    parser.add_argument("--ops-backend", help="Override PointNet++ ops backend, e.g. pure_torch or pytorch3d.")
     parser.add_argument("--dropout", type=float, default=0.0)
     parser.add_argument("--output-json", help="Optional path to write profile result JSON.")
     return parser.parse_args()
@@ -53,6 +54,8 @@ def apply_model_overrides(config: dict[str, Any], args: argparse.Namespace) -> d
         model_config["sa_npoints"] = sa_npoints
     if sa_nsamples is not None:
         model_config["sa_nsamples"] = sa_nsamples
+    if args.ops_backend:
+        model_config["ops_backend"] = args.ops_backend
     model_config["dropout"] = args.dropout
     return config
 
@@ -87,6 +90,7 @@ def profile(args: argparse.Namespace) -> dict[str, Any]:
     )
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=0, drop_last=False)
     model = build_pointnet2_semseg_from_config(config).to(device)
+    effective_ops_backend = getattr(model, "ops_backend_name", "unknown")
     model.train()
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=0.001)
@@ -154,6 +158,8 @@ def profile(args: argparse.Namespace) -> dict[str, Any]:
             "sa_npoints": config.get("model", {}).get("sa_npoints"),
             "sa_nsamples": config.get("model", {}).get("sa_nsamples"),
             "input_features": config.get("model", {}).get("input_features"),
+            "ops_backend": config.get("model", {}).get("ops_backend", "pure_torch"),
+            "ops_backend_effective": effective_ops_backend,
         },
     }
     return result

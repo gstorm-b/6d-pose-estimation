@@ -466,6 +466,89 @@ Kết luận:
 - Vẫn cần mở PLY previews để kiểm tra trực quan trước khi sign-off chất lượng.
 - Phase tiếp theo là Phase 9: thêm test evaluation script và chạy held-out test split.
 
+## PointNet++ PyTorch3D Ops Optimization
+
+Sau khi thấy GPU usage chỉ khoảng 20% và training còn chậm, đã kiểm tra PyTorch3D trong environment hiện tại:
+
+```text
+torch=2.12.0+cu126
+pytorch3d=0.7.9
+pytorch3d._C available
+GPU=NVIDIA GeForce MX150
+```
+
+Ops có sẵn và chạy CUDA được:
+
+```text
+sample_farthest_points
+knn_points
+knn_gather
+ball_query
+```
+
+Đã implement backend config:
+
+```text
+src/models/pointnet2_ops.py
+  pure_torch backend
+  pytorch3d backend
+  fallback builder
+
+src/models/pointnet2_semseg.py
+  model.ops_backend support
+
+configs/train/pointnet2_semseg_k41144.yaml
+  ops_backend: pytorch3d
+```
+
+Benchmark:
+
+```text
+current_fps_1024: 0.4284 s
+pytorch3d_fps_1024: 0.0211 s
+```
+
+Profiler end-to-end trên full 16384-point dataset, batch size 1:
+
+```text
+pure_torch:
+  mean_seconds_per_batch=0.8340
+  max_allocated_mib=199.9
+  max_reserved_mib=228.0
+
+pytorch3d:
+  mean_seconds_per_batch=0.1143
+  max_allocated_mib=135.7
+  max_reserved_mib=158.0
+```
+
+Batch-size probe với PyTorch3D backend:
+
+```text
+batch_size=2:
+  mean_seconds_per_batch=0.1872
+  max_reserved_mib=288.0
+
+batch_size=4:
+  mean_seconds_per_batch=0.4654
+  max_reserved_mib=572.0
+```
+
+Validation:
+
+```text
+CUDA forward/backward with pytorch3d backend: pass
+train smoke with config backend=pytorch3d: pass
+```
+
+Kết luận:
+
+- Nên dùng PyTorch3D backend trước, chưa build custom extension.
+- PyTorch3D cho speedup khoảng 7x trên profiled train batch và dùng ít GPU memory hơn.
+- `batch_size=2` hoặc `batch_size=4` hiện đều fit trên MX150 với config đã profile.
+- Giữ `pure_torch` làm fallback/debug backend.
+- Nếu vẫn cần nhanh hơn, bước tiếp theo nên là tune batch size, DataLoader workers, pinned memory, và giảm CPU sync metrics trước khi viết fused/custom CUDA kernel.
+
 ## Tạo noise cho dataset cho gần với thực tế:
 - Hiện tại dataset pointcloud được generate khác clean, trong thực tế:
     - Nhiễu ánh sáng sẽ làm mất đi những cụm point cloud tại khu vực nhiễu.

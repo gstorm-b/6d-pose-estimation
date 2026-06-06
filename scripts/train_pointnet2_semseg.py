@@ -178,6 +178,7 @@ def main() -> int:
 
     train_loader, val_loader, train_dataset, _torch = build_loaders(config, args)
     model = build_pointnet2_semseg_from_config(config).to(device)
+    config.setdefault("model", {})["ops_backend_effective"] = getattr(model, "ops_backend_name", "unknown")
     num_classes = int(config.get("model", {}).get("num_classes", 2))
     if train_config.get("class_weight_mode", "auto") == "auto":
         weights = torch.from_numpy(class_weights_from_dataset(train_dataset, num_classes)).to(device)

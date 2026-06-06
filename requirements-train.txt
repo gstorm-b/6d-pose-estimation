@@ -6,3 +6,6 @@ tqdm
 pyyaml
 scikit-learn
 matplotlib
+
+# Optional optimized PointNet++ backend:
+# Install PyTorch3D separately with a wheel matching the local Torch/CUDA build.
