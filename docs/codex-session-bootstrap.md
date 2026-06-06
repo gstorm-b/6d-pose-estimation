@@ -32,6 +32,7 @@ If the task touches visualization, inspect:
 ```text
 scripts/view_point_cloud_open3d.py
 scripts/dataset_gui.py
+scripts/view_ply_pyside_vtk.py
 ```
 
 If the task touches PointNet++ or training, inspect:
@@ -227,6 +228,12 @@ Run the Open3D point-cloud viewer:
 python .\scripts\view_point_cloud_open3d.py .\synthetic-data\K41144\sample_000001
 ```
 
+Run the PySide6/VTK PLY viewer:
+
+```powershell
+python .\scripts\view_ply_pyside_vtk.py .\experiments\pointnet2_semseg_k41144_20260606_180212\inference\processed_sample_000011\prediction.ply
+```
+
 Run the Blender generator manually:
 
 ```powershell
@@ -242,4 +249,3 @@ At the end of a session, report:
 - Commands/tests run.
 - Any generated output folders.
 - Any known risks or follow-up tasks.
-

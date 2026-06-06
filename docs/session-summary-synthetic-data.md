@@ -166,6 +166,29 @@ Useful options:
 --no-window
 ```
 
+### PySide6/VTK PLY Viewer
+
+Viewer script:
+
+```text
+scripts/view_ply_pyside_vtk.py
+```
+
+Purpose:
+
+- Open individual `.ply` point-cloud files.
+- Browse a folder of `.ply` files.
+- Render colored point clouds with VTK in a PySide6 app.
+- Use Trackball Camera interaction like the dataset GUI: left-drag rotate, middle-drag pan, right-drag or wheel zoom.
+- Adjust point size and reset camera/interaction from the toolbar.
+- Show point count, color availability, unique color count, bounds, center, and extent.
+
+Run command:
+
+```powershell
+python .\scripts\view_ply_pyside_vtk.py .\experiments\pointnet2_semseg_k41144_20260606_180212\inference\processed_sample_000011\prediction.ply
+```
+
 ### PySide6 Dataset GUI
 
 GUI script:
