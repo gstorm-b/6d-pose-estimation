@@ -1,0 +1,51 @@
+# Python caches and local build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments and local environment files
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# IDE and OS metadata
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+desktop.ini
+
+# Project-local generated data and experiments
+synthetic-data/
+processed-data/
+experiments/
+
+# Model checkpoints and large ML artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.engine
+
+# Generated point-cloud / mesh previews
+*.ply
+
+# Blender temporary files
+*.blend1
+*.blend2
+*.blend@
+
+# Codex/local workspace metadata
+.codex/
+.agents/
