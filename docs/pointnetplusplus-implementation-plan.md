@@ -1379,7 +1379,7 @@ Interpretation:
 
 ### Phase 10: Inference API
 
-Status: Pending.
+Status: Done.
 
 Reason:
 
@@ -1398,17 +1398,59 @@ Deliverables:
   - predicted labels
   - optional colored `.ply`
 
-Command:
+Processed sample command:
 
 ```powershell
-python .\scripts\infer_pointnet2_semseg.py --checkpoint .\experiments\<run>\checkpoints\best.pt --sample .\processed-data\pointnet2_semseg_k41144_debug4096\test\sample_000001.npz --out .\experiments\<run>\inference_preview
+python .\scripts\infer_pointnet2_semseg.py --checkpoint .\experiments\pointnet2_semseg_k41144_20260606_180212\checkpoints\best.pt --sample .\processed-data\pointnet2_semseg_k41144\test\sample_000011.npz --sample-type processed --out .\experiments\pointnet2_semseg_k41144_20260606_180212\inference\processed_sample_000011 --device cuda --ops-backend pytorch3d --save-ply
 ```
 
-Pass criteria:
+Processed sample result:
 
-- Inference runs without training-only dependencies.
-- Output labels are aligned with input points.
-- Runtime and memory usage are recorded for MX150.
+```text
+sample: sample_000011
+source_type: processed
+points: 16384
+predicted_object_points: 10632
+ground_truth_object_points: 10650
+elapsed_seconds: 0.4877
+backend: pytorch3d
+synthetic_debug_accuracy: 0.9976
+```
+
+Raw sample command:
+
+```powershell
+python .\scripts\infer_pointnet2_semseg.py --checkpoint .\experiments\pointnet2_semseg_k41144_20260606_180212\checkpoints\best.pt --sample .\synthetic-data\K41144\sample_000011 --sample-type raw --out .\experiments\pointnet2_semseg_k41144_20260606_180212\inference\raw_sample_000011 --device cuda --ops-backend pytorch3d --num-points 16384 --save-ply
+```
+
+Raw sample result:
+
+```text
+sample: sample_000011
+source_type: raw
+points: 16384
+predicted_object_points: 6403
+ground_truth_object_points: 6440
+elapsed_seconds: 0.5222
+backend: pytorch3d
+synthetic_debug_accuracy: 0.9964
+```
+
+Output files per inference run:
+
+```text
+prediction.npz
+summary.json
+prediction.ply
+```
+
+Interpretation:
+
+- Inference runs without the training loop.
+- Output labels, probabilities, logits, pixels, and points are aligned by row.
+- Processed inference uses the existing fixed-size processed `.npz`.
+- Raw inference reconstructs camera points from `depth_m` and `camera_intrinsics`, samples points without using labels, and uses `normal_camera` features when required.
+- Synthetic raw masks are copied only for debug metrics; they are not used for inference sampling.
 
 ### Phase 11: Model Completion Criteria
 
@@ -1435,11 +1477,10 @@ The PointNet++ semantic model is considered complete for the first milestone onl
 
 Implement these in order:
 
-1. Add inference script/API.
-2. Run inference on a processed test sample and save prediction outputs.
-3. Add raw-depth inference path that reuses the same preprocessing as conversion.
-4. Visually inspect validation/test PLY previews before signing off semantic segmentation.
-5. Start the next model branch for instance segmentation or PPRNet++-style pose regression after semantic segmentation is signed off.
+1. Visually inspect validation/test/inference PLY previews before signing off semantic segmentation.
+2. Record any visible failure cases in this plan.
+3. Start the next model branch for instance segmentation or PPRNet++-style pose regression after semantic segmentation is signed off.
+4. Begin designing the pose-estimation target format derived from `object_to_camera` and instance labels.
 
 ## Resolved Decisions
 

@@ -598,6 +598,63 @@ Kết luận:
 - Vẫn cần kiểm tra trực quan PLY previews trước khi sign-off semantic segmentation.
 - Phase tiếp theo là Phase 10: inference script/API.
 
+## Phase 10 Inference API
+
+Đã thêm reusable inference API và CLI:
+
+```text
+src/inference/pointnet2_semseg_infer.py
+scripts/infer_pointnet2_semseg.py
+```
+
+Processed sample inference:
+
+```powershell
+python .\scripts\infer_pointnet2_semseg.py --checkpoint .\experiments\pointnet2_semseg_k41144_20260606_180212\checkpoints\best.pt --sample .\processed-data\pointnet2_semseg_k41144\test\sample_000011.npz --sample-type processed --out .\experiments\pointnet2_semseg_k41144_20260606_180212\inference\processed_sample_000011 --device cuda --ops-backend pytorch3d --save-ply
+```
+
+Processed result:
+
+```text
+points=16384
+predicted_object_points=10632
+ground_truth_object_points=10650
+elapsed_seconds=0.4877
+synthetic_debug_accuracy=0.9976
+```
+
+Raw sample inference:
+
+```powershell
+python .\scripts\infer_pointnet2_semseg.py --checkpoint .\experiments\pointnet2_semseg_k41144_20260606_180212\checkpoints\best.pt --sample .\synthetic-data\K41144\sample_000011 --sample-type raw --out .\experiments\pointnet2_semseg_k41144_20260606_180212\inference\raw_sample_000011 --device cuda --ops-backend pytorch3d --num-points 16384 --save-ply
+```
+
+Raw result:
+
+```text
+points=16384
+predicted_object_points=6403
+ground_truth_object_points=6440
+elapsed_seconds=0.5222
+synthetic_debug_accuracy=0.9964
+```
+
+Output files:
+
+```text
+prediction.npz
+summary.json
+prediction.ply
+```
+
+Kết luận:
+
+- Phase 10 pass: inference chạy độc lập khỏi training loop.
+- Output `points_camera`, `point_pixels`, `logits`, `probabilities`, `predicted_labels` align theo row.
+- Processed inference dùng `.npz` đã convert.
+- Raw inference reconstruct point cloud từ `depth_m + camera_intrinsics`, sample không dùng label, dùng `normal_camera` nếu checkpoint cần normals.
+- Synthetic `instance_mask` chỉ được copy vào output để debug, không dùng cho sampling/inference.
+
 ## Tạo noise cho dataset cho gần với thực tế:
 - Hiện tại dataset pointcloud được generate khác clean, trong thực tế:
     - Nhiễu ánh sáng sẽ làm mất đi những cụm point cloud tại khu vực nhiễu.

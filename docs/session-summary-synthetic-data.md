@@ -690,6 +690,43 @@ Interpretation:
 - Keep `pure_torch` for debugging and machines without PyTorch3D.
 - Do not build a custom extension yet; tune batch size, DataLoader, and metric synchronization first.
 
+PointNet++ inference API:
+
+```text
+module: src/inference/pointnet2_semseg_infer.py
+script: scripts/infer_pointnet2_semseg.py
+checkpoint: experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt
+ops_backend: pytorch3d
+```
+
+Processed sample inference smoke:
+
+```text
+sample: processed-data/pointnet2_semseg_k41144/test/sample_000011.npz
+output: experiments/pointnet2_semseg_k41144_20260606_180212/inference/processed_sample_000011
+points: 16384
+predicted_object_points: 10632
+ground_truth_object_points: 10650
+elapsed_seconds: 0.4877
+synthetic_debug_accuracy: 0.9976
+files: prediction.npz, summary.json, prediction.ply
+```
+
+Raw sample inference smoke:
+
+```text
+sample: synthetic-data/K41144/sample_000011
+output: experiments/pointnet2_semseg_k41144_20260606_180212/inference/raw_sample_000011
+points: 16384
+predicted_object_points: 6403
+ground_truth_object_points: 6440
+elapsed_seconds: 0.5222
+synthetic_debug_accuracy: 0.9964
+files: prediction.npz, summary.json, prediction.ply
+```
+
+Raw inference reconstructs points from `depth_m` and `camera_intrinsics`, samples without using labels, and uses `normal_camera` features when required. Synthetic masks are copied only for debug metrics.
+
 ### For PPRNet++-Style Training
 
 Do not overwrite raw format. Create a converter later.
@@ -725,7 +762,7 @@ scripts/export_yolo_segmentation.py
 
 ## Recommended Next Todo
 
-1. Add inference script/API for processed samples and later raw depth input.
-2. Run inference on one processed test sample and save prediction outputs.
-3. Visually inspect validation/test PLY previews.
-4. After semantic segmentation sign-off, start the instance segmentation or PPRNet++-style pose regression branch.
+1. Visually inspect validation/test/inference PLY previews.
+2. Record visible failure cases, if any.
+3. After semantic segmentation sign-off, start the instance segmentation or PPRNet++-style pose regression branch.
+4. Begin designing pose-estimation labels derived from `object_to_camera` and instance labels.
