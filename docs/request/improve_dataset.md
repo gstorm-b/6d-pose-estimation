@@ -404,7 +404,67 @@ Kết luận:
 - MX150 fit được tất cả config đã profile với `batch_size=1`.
 - Config hiện tại `sa_npoints=[1024,256,64]` an toàn cho baseline 16384 points.
 - Config lớn `sa_npoints=[4096,1024,256]` cũng fit nhưng chậm hơn nhiều, chưa nên dùng làm baseline đầu tiên.
-- Phase tiếp theo là Phase 8: chạy full synthetic baseline với `processed-data/pointnet2_semseg_k41144`, `batch_size=1`, `device=cuda`.
+- Bước tiếp theo từ Phase 7 là Phase 8: chạy full synthetic baseline với `processed-data/pointnet2_semseg_k41144`, `batch_size=1`, `device=cuda`.
+
+## Phase 8 Full Synthetic Baseline
+
+Đã train full processed dataset 16384 points:
+
+```text
+experiment: experiments/pointnet2_semseg_k41144_20260606_180212
+dataset: processed-data/pointnet2_semseg_k41144
+epochs: 20
+batch_size: 1
+device: cuda
+runtime: about 21.6 minutes on NVIDIA GeForce MX150
+```
+
+Best validation epoch:
+
+```text
+epoch=19
+val_loss=0.00499
+val_mean_iou=0.9961
+val_object_iou=0.9973
+val_object_recall=0.9984
+```
+
+Final epoch:
+
+```text
+epoch=20
+val_loss=0.00518
+val_mean_iou=0.9948
+val_object_iou=0.9964
+val_object_recall=0.9969
+```
+
+Đã export validation previews:
+
+```text
+checkpoint: experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt
+output: experiments/pointnet2_semseg_k41144_20260606_180212/previews/val
+sample_count: 8
+files: 8 gt PLY + 8 pred PLY + 8 error PLY + preview_summary.json
+```
+
+Preview overall metrics:
+
+```text
+overall_accuracy=0.9982
+mean_iou=0.9960
+object_iou=0.9972
+object_precision=0.9990
+object_recall=0.9982
+confusion_matrix=[[45789,83],[155,85045]]
+```
+
+Kết luận:
+
+- Phase 8 pass rất tốt trên full synthetic validation split.
+- Checkpoint `best.pt` hiện là baseline semantic segmentation chính đầu tiên.
+- Vẫn cần mở PLY previews để kiểm tra trực quan trước khi sign-off chất lượng.
+- Phase tiếp theo là Phase 9: thêm test evaluation script và chạy held-out test split.
 
 ## Tạo noise cho dataset cho gần với thực tế:
 - Hiện tại dataset pointcloud được generate khác clean, trong thực tế:

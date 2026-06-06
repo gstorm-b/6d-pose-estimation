@@ -1132,53 +1132,84 @@ Interpretation:
 
 ### Phase 8: Full Synthetic Baseline
 
-Status: Next.
+Status: Done.
 
 Reason:
 
 - This is the first meaningful model baseline after overfit/debug gates pass.
 
-Recommended next command, using the full 16384-point processed dataset with the current safe config:
-
-```powershell
-python .\scripts\train_pointnet2_semseg.py --config .\configs\train\pointnet2_semseg_k41144.yaml --data .\processed-data\pointnet2_semseg_k41144 --epochs 100 --batch-size 1 --device cuda
-```
-
-Shorter checkpoint run before committing to 100 epochs:
+Command used, using the full 16384-point processed dataset with the current safe config:
 
 ```powershell
 python .\scripts\train_pointnet2_semseg.py --config .\configs\train\pointnet2_semseg_k41144.yaml --data .\processed-data\pointnet2_semseg_k41144 --epochs 20 --batch-size 1 --device cuda
 ```
 
-Fallback command, using the `4096` debug dataset:
-
-```powershell
-python .\scripts\train_pointnet2_semseg.py --config .\configs\train\pointnet2_semseg_k41144.yaml --data .\processed-data\pointnet2_semseg_k41144_debug4096 --epochs 100 --batch-size 1 --device cuda
-```
-
-Deliverables:
-
-- Experiment folder:
+Current result:
 
 ```text
-experiments/pointnet2_semseg_k41144_<timestamp>/
+experiment: experiments/pointnet2_semseg_k41144_20260606_180212
+dataset: processed-data/pointnet2_semseg_k41144
+points per sample: 16384
+epochs: 20
+batch_size: 1
+device: cuda
+runtime: about 21.6 minutes on NVIDIA GeForce MX150
+```
+
+Best validation epoch:
+
+```text
+epoch=19
+val_loss=0.00499
+val_mean_iou=0.9961
+val_object_iou=0.9973
+val_object_recall=0.9984
+```
+
+Final epoch:
+
+```text
+epoch=20
+val_loss=0.00518
+val_mean_iou=0.9948
+val_object_iou=0.9964
+val_object_recall=0.9969
+```
+
+Deliverables created:
+
+```text
+experiments/pointnet2_semseg_k41144_20260606_180212/
   config.json
   metrics.json
   checkpoints/best.pt
   checkpoints/last.pt
-  previews/
+  previews/val/
 ```
 
-Pass criteria:
+Validation preview export:
 
 ```text
-val object_recall >= 0.80
-val object_iou >= 0.60
-mean_iou improves over debug baseline
-previews show coherent object masks
+checkpoint: experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt
+data: processed-data/pointnet2_semseg_k41144
+split: val
+sample_count: 8
+files: 8 gt PLY + 8 pred PLY + 8 error PLY + preview_summary.json
+overall_accuracy=0.9982
+mean_iou=0.9960
+object_iou=0.9972
+object_precision=0.9990
+object_recall=0.9982
+confusion_matrix=[[45789,83],[155,85045]]
 ```
 
-These targets are initial synthetic-only thresholds. Tighten them after seeing real validation behavior.
+Interpretation:
+
+- Phase 8 passes the synthetic-only acceptance criteria by a wide margin.
+- The 20-epoch full 16384-point baseline is now the first meaningful semantic segmentation checkpoint.
+- Metrics are very high on synthetic validation, so do not treat this as real-world readiness yet.
+- The generated PLY previews should still be visually inspected in Open3D/MeshLab before final sign-off.
+- The next engineering step is test evaluation on the held-out synthetic test split.
 
 ### Phase 9: Test Evaluation
 
@@ -1265,20 +1296,11 @@ The PointNet++ semantic model is considered complete for the first milestone onl
 
 Implement these in order:
 
-1. Create `processed-data/pointnet2_semseg_k41144_debug4096`.
-2. Add train script flags:
-   - `--limit-train-samples`
-   - `--limit-val-samples`
-   - `--disable-augment`
-   - `--overfit`
-3. Run one-sample overfit on CUDA.
-4. Run two-sample overfit on CUDA.
-5. Add prediction preview PLY export.
-6. Train debug4096 full split for 20 epochs.
-7. Profile whether `8192` or `16384` points fit MX150.
-8. Run the first real synthetic baseline.
-9. Add test evaluation script.
-10. Add inference script.
+1. Add test evaluation script.
+2. Run held-out test evaluation for `experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt`.
+3. Export optional test previews.
+4. Add inference script/API.
+5. Start the next model branch for instance segmentation or PPRNet++-style pose regression after semantic segmentation is signed off.
 
 ## Resolved Decisions
 

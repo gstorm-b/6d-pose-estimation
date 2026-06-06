@@ -566,11 +566,53 @@ val_object_recall=0.0000
 
 This only verifies the end-to-end training path; it is not a quality baseline.
 
-Run a short full-processed-dataset GPU smoke test:
+Full synthetic baseline:
 
-```powershell
-python .\scripts\train_pointnet2_semseg.py --config .\configs\train\pointnet2_semseg_k41144.yaml --data .\processed-data\pointnet2_semseg_k41144 --epochs 2 --batch-size 1 --device cuda
+```text
+experiment: experiments/pointnet2_semseg_k41144_20260606_180212
+dataset: processed-data/pointnet2_semseg_k41144
+points per sample: 16384
+epochs: 20
+batch_size: 1
+device: cuda
+runtime: about 21.6 minutes on NVIDIA GeForce MX150
 ```
+
+Best validation epoch:
+
+```text
+epoch=19
+val_loss=0.00499
+val_mean_iou=0.9961
+val_object_iou=0.9973
+val_object_recall=0.9984
+```
+
+Final epoch:
+
+```text
+epoch=20
+val_loss=0.00518
+val_mean_iou=0.9948
+val_object_iou=0.9964
+val_object_recall=0.9969
+```
+
+Validation previews:
+
+```text
+checkpoint: experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt
+output: experiments/pointnet2_semseg_k41144_20260606_180212/previews/val
+sample_count: 8
+overall_accuracy=0.9982
+mean_iou=0.9960
+object_iou=0.9972
+object_precision=0.9990
+object_recall=0.9982
+confusion_matrix=[[45789,83],[155,85045]]
+```
+
+This is the first meaningful PointNet++ semantic segmentation baseline. It passes the synthetic validation target by a wide margin, but PLY previews still need human visual inspection and test evaluation before sign-off.
 
 ### For PPRNet++-Style Training
 
@@ -607,19 +649,8 @@ scripts/export_yolo_segmentation.py
 
 ## Recommended Next Todo
 
-1. Regenerate the main raw dataset with the latest generator command.
-2. Run the formal validator over the regenerated raw dataset:
-
-```powershell
-python .\scripts\validate_raw_dataset.py --data .\synthetic-data\K41144_NEW
-```
-
-3. After raw dataset is stable, create converters:
-
-```text
-scripts/prepare_pointnet_dataset.py
-scripts/prepare_pprnet_dataset.py
-scripts/export_yolo_segmentation.py
-```
-
-4. Then start training experiments.
+1. Add `scripts/eval_pointnet2_semseg.py`.
+2. Run held-out test evaluation for `experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt`.
+3. Export optional test previews.
+4. Add inference script/API for processed samples and later raw depth input.
+5. After semantic segmentation sign-off, start the instance segmentation or PPRNet++-style pose regression branch.
