@@ -615,6 +615,42 @@ confusion_matrix=[[45789,83],[155,85045]]
 
 This is the first meaningful PointNet++ semantic segmentation baseline. It passes the synthetic validation target by a wide margin, but PLY previews still need human visual inspection and test evaluation before sign-off.
 
+Held-out test evaluation:
+
+```text
+script: scripts/eval_pointnet2_semseg.py
+checkpoint: experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt
+data: processed-data/pointnet2_semseg_k41144
+split: test
+output: experiments/pointnet2_semseg_k41144_20260606_180212/test_metrics.json
+sample_count: 7
+device: cuda
+ops_backend: pytorch3d
+seed: 7
+```
+
+Test metrics:
+
+```text
+loss=0.0075
+overall_accuracy=0.9972
+mean_iou=0.9939
+object_iou=0.9957
+object_precision=0.9991
+object_recall=0.9966
+confusion_matrix=[[40074,64],[254,74296]]
+```
+
+Test previews:
+
+```text
+output: experiments/pointnet2_semseg_k41144_20260606_180212/previews/test
+sample_count: 7
+files: 7 gt PLY + 7 pred PLY + 7 error PLY + preview_summary.json
+```
+
+This passes the first held-out synthetic test gate. The remaining semantic-model sign-off item is human visual inspection of the PLY previews.
+
 PointNet++ ops optimization:
 
 ```text
@@ -689,8 +725,7 @@ scripts/export_yolo_segmentation.py
 
 ## Recommended Next Todo
 
-1. Add `scripts/eval_pointnet2_semseg.py`.
-2. Run held-out test evaluation for `experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt`.
-3. Export optional test previews.
-4. Add inference script/API for processed samples and later raw depth input.
-5. After semantic segmentation sign-off, start the instance segmentation or PPRNet++-style pose regression branch.
+1. Add inference script/API for processed samples and later raw depth input.
+2. Run inference on one processed test sample and save prediction outputs.
+3. Visually inspect validation/test PLY previews.
+4. After semantic segmentation sign-off, start the instance segmentation or PPRNet++-style pose regression branch.

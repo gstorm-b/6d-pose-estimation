@@ -549,6 +549,55 @@ Kết luận:
 - Giữ `pure_torch` làm fallback/debug backend.
 - Nếu vẫn cần nhanh hơn, bước tiếp theo nên là tune batch size, DataLoader workers, pinned memory, và giảm CPU sync metrics trước khi viết fused/custom CUDA kernel.
 
+## Phase 9 Held-Out Test Evaluation
+
+Đã thêm evaluation script:
+
+```text
+scripts/eval_pointnet2_semseg.py
+```
+
+Đã chạy held-out synthetic test split với PyTorch3D backend:
+
+```text
+checkpoint: experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt
+data: processed-data/pointnet2_semseg_k41144
+split: test
+output: experiments/pointnet2_semseg_k41144_20260606_180212/test_metrics.json
+sample_count: 7
+device: cuda
+ops_backend: pytorch3d
+seed: 7
+```
+
+Test metrics:
+
+```text
+loss=0.0075
+overall_accuracy=0.9972
+mean_iou=0.9939
+object_iou=0.9957
+object_precision=0.9991
+object_recall=0.9966
+confusion_matrix=[[40074,64],[254,74296]]
+```
+
+Đã export test previews:
+
+```text
+output: experiments/pointnet2_semseg_k41144_20260606_180212/previews/test
+sample_count: 7
+files: 7 gt PLY + 7 pred PLY + 7 error PLY + preview_summary.json
+```
+
+Kết luận:
+
+- Phase 9 pass: test metrics gần validation metrics.
+- Không có dấu hiệu collapse toàn background hoặc toàn object.
+- Confusion matrix đã được lưu trong `test_metrics.json`.
+- Vẫn cần kiểm tra trực quan PLY previews trước khi sign-off semantic segmentation.
+- Phase tiếp theo là Phase 10: inference script/API.
+
 ## Tạo noise cho dataset cho gần với thực tế:
 - Hiện tại dataset pointcloud được generate khác clean, trong thực tế:
     - Nhiễu ánh sáng sẽ làm mất đi những cụm point cloud tại khu vực nhiễu.

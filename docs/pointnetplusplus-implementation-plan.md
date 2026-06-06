@@ -1317,7 +1317,7 @@ Interpretation:
 
 ### Phase 9: Test Evaluation
 
-Status: Pending.
+Status: Done.
 
 Reason:
 
@@ -1327,20 +1327,55 @@ Reason:
 Deliverables:
 
 - `scripts/eval_pointnet2_semseg.py`
-- `experiments/<run>/test_metrics.json`
-- Optional test previews.
+- `experiments/pointnet2_semseg_k41144_20260606_180212/test_metrics.json`
+- `experiments/pointnet2_semseg_k41144_20260606_180212/previews/test/`
 
-Command:
+Command used:
 
 ```powershell
-python .\scripts\eval_pointnet2_semseg.py --checkpoint .\experiments\<run>\checkpoints\best.pt --data .\processed-data\pointnet2_semseg_k41144_debug4096 --split test --device cuda
+python .\scripts\eval_pointnet2_semseg.py --checkpoint .\experiments\pointnet2_semseg_k41144_20260606_180212\checkpoints\best.pt --data .\processed-data\pointnet2_semseg_k41144 --split test --out .\experiments\pointnet2_semseg_k41144_20260606_180212\test_metrics.json --device cuda --batch-size 1 --ops-backend pytorch3d
 ```
 
-Pass criteria:
+Test result:
 
-- Test metrics are close to validation metrics.
-- No class collapses to all-background or all-object.
-- Confusion matrix is saved.
+```text
+checkpoint: experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt
+split: test
+sample_count: 7
+device: cuda
+ops_backend: pytorch3d
+seed: 7
+loss=0.0075
+overall_accuracy=0.9972
+mean_iou=0.9939
+object_iou=0.9957
+object_precision=0.9991
+object_recall=0.9966
+confusion_matrix=[[40074,64],[254,74296]]
+```
+
+Test preview export:
+
+```powershell
+python .\scripts\preview_pointnet2_semseg_predictions.py --checkpoint .\experiments\pointnet2_semseg_k41144_20260606_180212\checkpoints\best.pt --data .\processed-data\pointnet2_semseg_k41144 --split test --out .\experiments\pointnet2_semseg_k41144_20260606_180212\previews\test --max-samples 7 --device cuda --ops-backend pytorch3d
+```
+
+Preview result:
+
+```text
+sample_count: 7
+files: 7 gt PLY + 7 pred PLY + 7 error PLY + preview_summary.json
+mean_iou=0.9939
+object_iou=0.9957
+object_recall=0.9966
+```
+
+Interpretation:
+
+- Phase 9 passes: test metrics are close to validation metrics.
+- No all-background or all-object collapse is observed.
+- The confusion matrix is saved in `test_metrics.json`.
+- PLY previews still need human visual inspection before signing off the semantic model.
 
 ### Phase 10: Inference API
 
@@ -1400,10 +1435,10 @@ The PointNet++ semantic model is considered complete for the first milestone onl
 
 Implement these in order:
 
-1. Add test evaluation script.
-2. Run held-out test evaluation for `experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt`.
-3. Export optional test previews.
-4. Add inference script/API.
+1. Add inference script/API.
+2. Run inference on a processed test sample and save prediction outputs.
+3. Add raw-depth inference path that reuses the same preprocessing as conversion.
+4. Visually inspect validation/test PLY previews before signing off semantic segmentation.
 5. Start the next model branch for instance segmentation or PPRNet++-style pose regression after semantic segmentation is signed off.
 
 ## Resolved Decisions

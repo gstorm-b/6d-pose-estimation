@@ -20,6 +20,7 @@ from src.data.pointnet2_dataset import PointNet2SemSegDataset  # noqa: E402
 from src.models.pointnet2_semseg import build_pointnet2_semseg_from_config  # noqa: E402
 from src.training.checkpoint import load_checkpoint  # noqa: E402
 from src.training.metrics import SegmentationMeter  # noqa: E402
+from src.training.seed import seed_everything  # noqa: E402
 
 
 COLOR_BACKGROUND = np.array([120, 120, 120], dtype=np.uint8)
@@ -39,6 +40,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-samples", type=int, default=8)
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--normalize", help="Override dataset normalization mode.")
+    parser.add_argument("--ops-backend", default="pytorch3d", help="Override PointNet++ ops backend for preview.")
+    parser.add_argument("--seed", type=int, help="Override preview RNG seed. Defaults to checkpoint config seed.")
     return parser.parse_args()
 
 
@@ -143,7 +146,11 @@ def main() -> int:
     checkpoint_path = Path(args.checkpoint)
     checkpoint = load_checkpoint(checkpoint_path, map_location="cpu")
     config = checkpoint.get("config", {})
+    if args.ops_backend:
+        config.setdefault("model", {})["ops_backend"] = args.ops_backend
     num_classes = int(config.get("model", {}).get("num_classes", 2))
+    seed = int(args.seed if args.seed is not None else config.get("seed", config.get("train", {}).get("seed", 7)))
+    seed_everything(seed)
 
     import torch
 
@@ -195,6 +202,9 @@ def main() -> int:
         "data_root": str(data_root),
         "split": args.split,
         "device": device,
+        "ops_backend_requested": args.ops_backend,
+        "ops_backend_effective": getattr(model, "ops_backend_name", "unknown"),
+        "seed": seed,
         "sample_count": len(samples),
         "overall_metrics": overall_meter.compute(),
         "samples": samples,
