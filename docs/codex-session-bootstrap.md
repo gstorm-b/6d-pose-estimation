@@ -12,6 +12,7 @@ docs/session-summary-synthetic-data.md
 docs/pointnetplusplus-implementation-plan.md
 docs/pointnet2-instance-segmentation-plan.md
 docs/pointnet2-pose-estimation-plan.md
+docs/dataset-build-and-test-guide.md
 ```
 
 Then inspect the current user request, usually under:
@@ -43,6 +44,7 @@ If the task touches PointNet++ or training, inspect:
 docs/pointnetplusplus-implementation-plan.md
 docs/pointnet2-instance-segmentation-plan.md
 docs/pointnet2-pose-estimation-plan.md
+docs/dataset-build-and-test-guide.md
 ```
 
 and then look for current `configs/`, `src/`, `scripts/`, `processed-data/`, and `experiments/` folders before assuming they exist.
