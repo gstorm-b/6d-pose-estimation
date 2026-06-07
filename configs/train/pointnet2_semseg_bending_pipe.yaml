@@ -1,0 +1,43 @@
+conversion:
+  num_points: 16384
+  use_normals: true
+  object_fraction_target: 0.65
+  train_ratio: 0.8
+  val_ratio: 0.1
+  test_ratio: 0.1
+  seed: 7
+
+dataset:
+  root: processed-data/pointnet2_semseg_bending_pipe
+  normalize: scene_center
+  augment:
+    enabled: true
+    xyz_jitter_std: 0.0005
+    xyz_jitter_clip: 0.002
+    depth_noise_std: 0.0007
+    point_dropout_prob: 0.03
+    outlier_ratio: 0.002
+    outlier_std: 0.015
+    normal_jitter_std: 0.02
+    random_z_rotation: false
+
+model:
+  name: pointnet2_semseg
+  num_classes: 2
+  input_features: xyz_normal
+  ops_backend: pytorch3d
+  sa_npoints: [1024, 256, 64]
+  sa_nsamples: [32, 32, 32]
+  dropout: 0.4
+
+train:
+  seed: 7
+  device: cuda
+  num_workers: 0
+  epochs: 100
+  batch_size: 4
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  class_weight_mode: auto
+  debug_num_points: 4096
+  baseline_num_points: 16384

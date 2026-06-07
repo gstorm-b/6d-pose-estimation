@@ -10,6 +10,8 @@ Read these files in this order:
 docs/engineering-rules.md
 docs/session-summary-synthetic-data.md
 docs/pointnetplusplus-implementation-plan.md
+docs/pointnet2-instance-segmentation-plan.md
+docs/pointnet2-pose-estimation-plan.md
 ```
 
 Then inspect the current user request, usually under:
@@ -39,6 +41,8 @@ If the task touches PointNet++ or training, inspect:
 
 ```text
 docs/pointnetplusplus-implementation-plan.md
+docs/pointnet2-instance-segmentation-plan.md
+docs/pointnet2-pose-estimation-plan.md
 ```
 
 and then look for current `configs/`, `src/`, `scripts/`, `processed-data/`, and `experiments/` folders before assuming they exist.
@@ -69,6 +73,9 @@ Important object facts:
 - Object: `object-model/K41144.stl`.
 - Approximate size: `30 mm x 93.6 mm x 20 mm`.
 - STL origin is not centered. Generator recenters mesh vertices for physics and stores transforms so exported poses still refer to the original STL coordinate frame.
+- Secondary design/test object: `object-model/bending_pipe.stl`.
+- `bending_pipe.stl` is authored in millimeters and should be generated with `--model-scale 0.001`.
+- Test K41144 and bending_pipe as separate single-class datasets unless a future multi-class experiment explicitly requires mixing them.
 
 Important raw sample files:
 
@@ -105,7 +112,13 @@ object_to_world
 object_to_camera
 camera_to_world
 world_to_camera
+object_to_depth_camera
+object_to_rgb_camera
+depth_camera_to_world
+rgb_camera_to_world
 ```
+
+Legacy camera fields refer to the depth camera. RGB render camera fields are stored separately for `rgb.png`.
 
 ## Senior Engineer Workflow
 
@@ -166,6 +179,8 @@ python .\scripts\dataset_gui.py
 GUI responsibilities:
 
 - Run the Blender generator via `QProcess`.
+- Expose model path, class name, model scale, depth-camera, RGB-camera, and light generation parameters.
+- Expose spawn settle frames, object restitution, and JSON generator preset import/export in the Generation group.
 - Stream logs without blocking the UI.
 - Browse raw datasets and preview samples.
 - Load sample previews and point clouds in worker threads.
@@ -199,6 +214,106 @@ Experiments should go under:
 ```text
 experiments/
 ```
+
+## Current Pose Direction
+
+Instance segmentation Phase 0-10 is complete. The pose branch has Phase 11-13 implemented:
+
+```text
+src/data/pose_crop_dataset.py
+src/training/pose_geometry.py
+src/training/pose_metrics.py
+src/training/pose_losses.py
+src/models/pointnet2_pose.py
+scripts/train_pointnet2_pose.py
+scripts/eval_pointnet2_pose.py
+configs/train/pointnet2_pose_k41144.yaml
+configs/train/pointnet2_pose_bending_pipe.yaml
+```
+
+Pose training consumes crop exports from:
+
+```text
+scripts/export_pose_instance_crops.py
+```
+
+Frame and scale details:
+
+- Pose targets use generator metadata camera coordinates; `PoseCropDataset` flips crop point-cloud `z` from positive-forward depth convention into metadata camera convention.
+- K41144 symmetry set is `{I, R_y(pi)}`.
+- bending_pipe symmetry set is `{I}` and uses `model_scale: 0.001`.
+- Pose model uses crop-centered xyz+normal input plus 18 aux features: normalized crop centroid, normalized bbox extents relative to centroid, and xyz central moment features.
+
+Tiny GT-crop overfit smoke results from Phase 13:
+
+```text
+K41144 2 crops: best ADD 6.627 mm, best translation 0.045 mm, ADD_0.1d success 1.0.
+bending_pipe 2 crops: best ADD 0.218 mm, best translation 0.014 mm, ADD_0.1d success 1.0.
+```
+
+Phase 14 full GT-crop evaluation has been run, but the direct crop-level PointNet++ pose MVP did not meet target:
+
+```text
+K41144:
+  crops: experiments/phase14_pose_crops_k41144_gt_*_xyznormal
+  experiment: experiments/pointnet2_pose_k41144_20260607_230547
+  test: ADD 27.719 mm, translation 30.225 mm, ADD_0.1d success 0.123
+
+bending_pipe:
+  crops: experiments/phase14_pose_crops_bending_pipe_gt_*_xyznormal
+  experiment: experiments/pointnet2_pose_bending_pipe_20260607_230546
+  test: ADD 80.936 mm, translation 71.057 mm, ADD_0.1d success 0.000
+```
+
+Phase 15-18 pose update:
+
+```text
+Primary pose path is now PS6D-style keypoint/center voting.
+
+Implemented:
+  src/models/pointnet2_pose_voting.py
+  configs/train/pointnet2_pose_voting_k41144.yaml
+  configs/train/pointnet2_pose_voting_bending_pipe.yaml
+
+Training script additions:
+  checkpoints/best_add.pt
+  --resume
+  --resume-new-experiment
+```
+
+GT-crop test results with keypoint voting:
+
+```text
+K41144:
+  experiment: experiments/pointnet2_pose_k41144_20260608_023605
+  checkpoint: checkpoints/best_add.pt
+  test: ADD 5.607 mm, translation 6.021 mm, ADD_0.1d success 0.897
+
+bending_pipe:
+  experiment: experiments/pointnet2_pose_bending_pipe_20260608_021309
+  checkpoint: checkpoints/best_add.pt
+  test: ADD 9.899 mm, translation 9.529 mm, ADD_0.1d success 0.833
+```
+
+Predicted-crop test results:
+
+```text
+K41144 predicted crops:
+  crops: experiments/phase17_pose_crops_k41144_pred_test_xyznormal
+  matched_gt_iou >= 0.5: ADD 10.719 mm, translation 11.087 mm, ADD_0.1d success 0.738
+  all predicted crops:    ADD 21.932 mm, translation 22.831 mm, ADD_0.1d success 0.540
+
+bending_pipe predicted crops:
+  crops: experiments/phase17_pose_crops_bending_pipe_pred_test_xyznormal
+  matched_gt_iou >= 0.5: ADD 12.146 mm, translation 13.470 mm, ADD_0.1d success 0.923
+  all predicted crops:    ADD 18.456 mm, translation 18.612 mm, ADD_0.1d success 0.714
+```
+
+Remaining gap:
+
+- ADD_0.1d target is met on GT-crop test for both objects.
+- Strict translation `< 5 mm` is still not fully met.
+- Next improvement should add optional ICP/refinement or stronger translation supervision and report refined pose separately from raw keypoint-voting pose.
 
 ## Useful Starting Commands
 

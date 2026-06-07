@@ -1,0 +1,48 @@
+seed: 7
+
+object:
+  class_name: K41144
+  model_path: object-model/K41144.stl
+  model_scale: 1.0
+  model_point_count: 1024
+  symmetry_name: k41144
+
+dataset:
+  require_pose: true
+  min_matched_gt_iou: null
+  pose_augmentation:
+    repeats: 1
+    max_camera_rotation_deg: 90.0
+    translation_std_m: 0.02
+    point_jitter_std_m: 0.0002
+
+model:
+  name: pointnet2_pose_voting
+  input_features: xyz_normal
+  num_points: 1024
+  ops_backend: pytorch3d
+  sa_npoints: [256, 64, 16]
+  sa_nsamples: [32, 32, 32]
+  hidden_channels: 256
+  aux_channels: 18
+  keypoint_count: 8
+  dropout: 0.05
+
+loss:
+  object_coord_weight: 0.05
+  center_vote_weight: 12.0
+  keypoint_vote_weight: 3.0
+  rotation_weight: 1.0
+  model_points_weight: 1.0
+  model_points_use_gt_translation: true
+  smooth_l1_beta: 0.02
+
+train:
+  seed: 7
+  device: cuda
+  num_workers: 0
+  epochs: 80
+  batch_size: 32
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  freeze_batchnorm: false

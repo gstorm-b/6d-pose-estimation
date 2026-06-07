@@ -473,15 +473,29 @@ class DatasetGui(QMainWindow):
 
         self.blender_path_edit = QLineEdit(BLENDER_DEFAULT)
         self.model_path_edit = QLineEdit("object-model/K41144.stl")
+        self.class_name_edit = QLineEdit("K41144")
+        self.class_name_edit.setPlaceholderText("Defaults to STL filename stem")
         self.output_path_edit = QLineEdit()
         form.addRow("Blender", self._path_row(self.blender_path_edit, self.browse_blender))
         form.addRow("Model", self._path_row(self.model_path_edit, self.browse_model))
+        form.addRow("Class name", self.class_name_edit)
         form.addRow("Output", self._path_row(self.output_path_edit, self.browse_output))
 
         self.samples_spin = self._spin(1, 100000, 3)
         self.objects_spin = self._spin(1, 200, 30)
         self.width_spin = self._spin(32, 4096, 320)
         self.height_spin = self._spin(32, 4096, 240)
+        self.model_scale_spin = self._double_spin(0.000001, 1000.0, 1.0, 6, 0.001)
+        self.model_scale_spin.setToolTip("Scale applied to STL vertices before simulation. Use 0.001 for millimeter STL files.")
+        self.depth_camera_location_row, self.depth_camera_location_spins = self._xyz_spins((0.0, -0.05, 0.42))
+        self.depth_camera_target_row, self.depth_camera_target_spins = self._xyz_spins((0.0, 0.0, 0.025))
+        self.depth_camera_lens_spin = self._double_spin(1.0, 300.0, 35.0, 2, 1.0)
+        self.rgb_camera_location_row, self.rgb_camera_location_spins = self._xyz_spins((0.0, -0.05, 0.42))
+        self.rgb_camera_target_row, self.rgb_camera_target_spins = self._xyz_spins((0.0, 0.0, 0.025))
+        self.rgb_camera_lens_spin = self._double_spin(1.0, 300.0, 35.0, 2, 1.0)
+        self.light_location_row, self.light_location_spins = self._xyz_spins((0.0, -0.22, 0.45))
+        self.light_energy_spin = self._double_spin(0.0, 100000.0, 90.0, 2, 10.0)
+        self.light_size_spin = self._double_spin(0.001, 10.0, 0.45, 3, 0.01)
         self.bin_x_spin = self._double_spin(0.01, 5.0, 0.24, 3, 0.01)
         self.bin_y_spin = self._double_spin(0.01, 5.0, 0.24, 3, 0.01)
         self.bin_wall_height_spin = self._double_spin(0.01, 5.0, 0.14, 3, 0.01)
@@ -490,6 +504,10 @@ class DatasetGui(QMainWindow):
         self.objects_per_layer_spin = self._spin(1, 100, 6)
         self.spawn_min_distance_spin = self._double_spin(0.0, 1.0, 0.045, 3, 0.005)
         self.collision_margin_spin = self._double_spin(0.0, 0.1, 0.00002, 6, 0.00001)
+        self.object_restitution_spin = self._double_spin(0.0, 1.0, 0.05, 3, 0.01)
+        self.object_restitution_spin.setToolTip("Rigid-body bounce/restitution for spawned objects. Lower values reduce rebounds.")
+        self.spawn_settle_frames_spin = self._spin(0, 5000, 35)
+        self.spawn_settle_frames_spin.setToolTip("If greater than 0, spawn one object, settle it for this many frames, then spawn the next object.")
         self.min_visible_objects_spin = self._spin(0, 200, 12)
         self.min_visible_points_spin = self._spin(0, 10000000, 8000)
         self.max_sample_attempts_spin = self._spin(1, 1000, 12)
@@ -509,6 +527,16 @@ class DatasetGui(QMainWindow):
         form.addRow("Objects", self.objects_spin)
         form.addRow("Width", self.width_spin)
         form.addRow("Height", self.height_spin)
+        form.addRow("Model scale", self.model_scale_spin)
+        form.addRow("Depth cam XYZ", self.depth_camera_location_row)
+        form.addRow("Depth target XYZ", self.depth_camera_target_row)
+        form.addRow("Depth lens", self.depth_camera_lens_spin)
+        form.addRow("RGB cam XYZ", self.rgb_camera_location_row)
+        form.addRow("RGB target XYZ", self.rgb_camera_target_row)
+        form.addRow("RGB lens", self.rgb_camera_lens_spin)
+        form.addRow("Light XYZ", self.light_location_row)
+        form.addRow("Light energy", self.light_energy_spin)
+        form.addRow("Light size", self.light_size_spin)
         form.addRow("Bin X", self.bin_x_spin)
         form.addRow("Bin Y", self.bin_y_spin)
         form.addRow("Wall height", self.bin_wall_height_spin)
@@ -517,13 +545,24 @@ class DatasetGui(QMainWindow):
         form.addRow("Spawn", self.spawn_strategy_combo)
         form.addRow("Objects/layer", self.objects_per_layer_spin)
         form.addRow("Spawn min dist", self.spawn_min_distance_spin)
+        form.addRow("Spawn settle frames", self.spawn_settle_frames_spin)
         form.addRow("Collision margin", self.collision_margin_spin)
         form.addRow("Collision shape", self.collision_shape_combo)
+        form.addRow("Object bounce", self.object_restitution_spin)
         form.addRow("Min visible objects", self.min_visible_objects_spin)
         form.addRow("Min visible points", self.min_visible_points_spin)
         form.addRow("Max attempts", self.max_sample_attempts_spin)
         form.addRow("Settle frames", self.settle_frames_spin)
         form.addRow("Out-of-bin", self.allow_out_of_bin_filtering_check)
+
+        preset_actions = QHBoxLayout()
+        import_preset_button = QPushButton("Import Preset")
+        import_preset_button.clicked.connect(self.import_generation_settings)
+        export_preset_button = QPushButton("Export Preset")
+        export_preset_button.clicked.connect(self.export_generation_settings)
+        preset_actions.addWidget(import_preset_button)
+        preset_actions.addWidget(export_preset_button)
+        form.addRow("Preset", preset_actions)
 
         self.start_button = QPushButton("Start Generation")
         self.start_button.clicked.connect(self.start_generation)
@@ -744,6 +783,168 @@ class DatasetGui(QMainWindow):
         spin.setValue(value)
         return spin
 
+    def _xyz_spins(
+        self,
+        values: tuple[float, float, float],
+        *,
+        minimum: float = -10.0,
+        maximum: float = 10.0,
+        decimals: int = 3,
+        step: float = 0.01,
+    ) -> tuple[QWidget, tuple[QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox]]:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        spins: list[QDoubleSpinBox] = []
+        for label, value in zip(("X", "Y", "Z"), values, strict=True):
+            layout.addWidget(QLabel(label))
+            spin = self._double_spin(minimum, maximum, value, decimals, step)
+            spin.setMinimumWidth(72)
+            layout.addWidget(spin)
+            spins.append(spin)
+        layout.addStretch(1)
+        return row, (spins[0], spins[1], spins[2])
+
+    def _extend_xyz_arg(self, args: list[str], flag: str, spins: tuple[QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox]) -> None:
+        args.append(flag)
+        args.extend(str(spin.value()) for spin in spins)
+
+    def _xyz_values(self, spins: tuple[QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox]) -> list[float]:
+        return [spin.value() for spin in spins]
+
+    def _set_xyz_values(self, spins: tuple[QDoubleSpinBox, QDoubleSpinBox, QDoubleSpinBox], values: object) -> None:
+        if not isinstance(values, (list, tuple)) or len(values) != 3:
+            raise ValueError("XYZ setting must be a list of 3 numbers")
+        for spin, value in zip(spins, values, strict=True):
+            spin.setValue(float(value))
+
+    def generation_settings(self) -> dict[str, Any]:
+        return {
+            "model": self.model_path_edit.text(),
+            "class_name": self.class_name_edit.text().strip(),
+            "model_scale": self.model_scale_spin.value(),
+            "output": self.output_path_edit.text(),
+            "samples": self.samples_spin.value(),
+            "objects": self.objects_spin.value(),
+            "width": self.width_spin.value(),
+            "height": self.height_spin.value(),
+            "depth_camera_location": self._xyz_values(self.depth_camera_location_spins),
+            "depth_camera_target": self._xyz_values(self.depth_camera_target_spins),
+            "depth_camera_lens": self.depth_camera_lens_spin.value(),
+            "rgb_camera_location": self._xyz_values(self.rgb_camera_location_spins),
+            "rgb_camera_target": self._xyz_values(self.rgb_camera_target_spins),
+            "rgb_camera_lens": self.rgb_camera_lens_spin.value(),
+            "light_location": self._xyz_values(self.light_location_spins),
+            "light_energy": self.light_energy_spin.value(),
+            "light_size": self.light_size_spin.value(),
+            "bin_x": self.bin_x_spin.value(),
+            "bin_y": self.bin_y_spin.value(),
+            "bin_wall_height": self.bin_wall_height_spin.value(),
+            "drop_height_min": self.drop_height_min_spin.value(),
+            "drop_height_max": self.drop_height_max_spin.value(),
+            "spawn_strategy": self.spawn_strategy_combo.currentText(),
+            "objects_per_layer": self.objects_per_layer_spin.value(),
+            "spawn_min_distance": self.spawn_min_distance_spin.value(),
+            "spawn_settle_frames": self.spawn_settle_frames_spin.value(),
+            "collision_margin": self.collision_margin_spin.value(),
+            "collision_shape": self.collision_shape_combo.currentText(),
+            "object_restitution": self.object_restitution_spin.value(),
+            "min_visible_objects": self.min_visible_objects_spin.value(),
+            "min_visible_points": self.min_visible_points_spin.value(),
+            "max_sample_attempts": self.max_sample_attempts_spin.value(),
+            "settle_frames": self.settle_frames_spin.value(),
+            "allow_out_of_bin_filtering": self.allow_out_of_bin_filtering_check.isChecked(),
+        }
+
+    def apply_generation_settings(self, settings: dict[str, Any]) -> None:
+        line_edits = {
+            "model": self.model_path_edit,
+            "class_name": self.class_name_edit,
+            "output": self.output_path_edit,
+        }
+        int_spins = {
+            "samples": self.samples_spin,
+            "objects": self.objects_spin,
+            "width": self.width_spin,
+            "height": self.height_spin,
+            "objects_per_layer": self.objects_per_layer_spin,
+            "spawn_settle_frames": self.spawn_settle_frames_spin,
+            "min_visible_objects": self.min_visible_objects_spin,
+            "min_visible_points": self.min_visible_points_spin,
+            "max_sample_attempts": self.max_sample_attempts_spin,
+            "settle_frames": self.settle_frames_spin,
+        }
+        double_spins = {
+            "model_scale": self.model_scale_spin,
+            "depth_camera_lens": self.depth_camera_lens_spin,
+            "rgb_camera_lens": self.rgb_camera_lens_spin,
+            "light_energy": self.light_energy_spin,
+            "light_size": self.light_size_spin,
+            "bin_x": self.bin_x_spin,
+            "bin_y": self.bin_y_spin,
+            "bin_wall_height": self.bin_wall_height_spin,
+            "drop_height_min": self.drop_height_min_spin,
+            "drop_height_max": self.drop_height_max_spin,
+            "spawn_min_distance": self.spawn_min_distance_spin,
+            "collision_margin": self.collision_margin_spin,
+            "object_restitution": self.object_restitution_spin,
+        }
+        xyz_spins = {
+            "depth_camera_location": self.depth_camera_location_spins,
+            "depth_camera_target": self.depth_camera_target_spins,
+            "rgb_camera_location": self.rgb_camera_location_spins,
+            "rgb_camera_target": self.rgb_camera_target_spins,
+            "light_location": self.light_location_spins,
+        }
+
+        for key, edit in line_edits.items():
+            if key in settings and settings[key] is not None:
+                edit.setText(str(settings[key]))
+        for key, spin in int_spins.items():
+            if key in settings and settings[key] is not None:
+                spin.setValue(int(settings[key]))
+        for key, spin in double_spins.items():
+            if key in settings and settings[key] is not None:
+                spin.setValue(float(settings[key]))
+        for key, spins in xyz_spins.items():
+            if key in settings and settings[key] is not None:
+                self._set_xyz_values(spins, settings[key])
+        if "spawn_strategy" in settings:
+            self.spawn_strategy_combo.setCurrentText(str(settings["spawn_strategy"]))
+        if "collision_shape" in settings:
+            self.collision_shape_combo.setCurrentText(str(settings["collision_shape"]))
+        if "allow_out_of_bin_filtering" in settings:
+            self.allow_out_of_bin_filtering_check.setChecked(bool(settings["allow_out_of_bin_filtering"]))
+
+    def import_generation_settings(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(self, "Import generator preset", str(PROJECT_ROOT), "JSON files (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            settings = json.loads(Path(path).read_text(encoding="utf-8"))
+            if not isinstance(settings, dict):
+                raise ValueError("Preset must contain a JSON object.")
+            self.apply_generation_settings(settings)
+            self.log_text.append(
+                f"[gui] Imported generator preset: {path} "
+                f"(objects={self.objects_spin.value()}, output={self.output_path_edit.text()}, "
+                f"collision={self.collision_shape_combo.currentText()})"
+            )
+        except Exception as exc:  # noqa: BLE001 - show malformed presets in the GUI.
+            QMessageBox.warning(self, "Could not import preset", str(exc))
+
+    def export_generation_settings(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(self, "Export generator preset", str(PROJECT_ROOT / "configs" / "generator_preset.json"), "JSON files (*.json);;All files (*)")
+        if not path:
+            return
+        try:
+            target = Path(path)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(self.generation_settings(), indent=2), encoding="utf-8")
+            self.log_text.append(f"[gui] Exported generator preset: {path}")
+        except Exception as exc:  # noqa: BLE001 - show filesystem errors in the GUI.
+            QMessageBox.warning(self, "Could not export preset", str(exc))
+
     def browse_dataset(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select raw dataset", self.dataset_path_edit.text())
         if path:
@@ -758,7 +959,11 @@ class DatasetGui(QMainWindow):
     def browse_model(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select STL model", str(PROJECT_ROOT / "object-model"), "STL files (*.stl);;All files (*)")
         if path:
-            self.model_path_edit.setText(self._display_path(Path(path)))
+            model_path = Path(path)
+            self.model_path_edit.setText(self._display_path(model_path))
+            current_class_name = self.class_name_edit.text().strip()
+            if not current_class_name or current_class_name == "K41144":
+                self.class_name_edit.setText(model_path.stem)
 
     def browse_output(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Select output folder", str(PROJECT_ROOT / "synthetic-data"))
@@ -1030,7 +1235,18 @@ class DatasetGui(QMainWindow):
         command_args = self.build_generator_args(output_path)
         policy = "filter" if self.allow_out_of_bin_filtering_check.isChecked() else "strict reject"
         self.log_text.append(f"[gui] Out-of-bin policy: {policy}")
+        self.log_text.append(
+            "[gui] Simulation estimate: "
+            f"{self.estimated_simulation_frames()} frames per attempt, "
+            f"{self.objects_spin.value()} objects, "
+            f"{self.width_spin.value()}x{self.height_spin.value()} render."
+        )
+        if self.collision_shape_combo.currentText() == "MESH":
+            self.log_text.append("[gui] Warning: MESH collision is much slower than CONVEX_HULL for bending_pipe.")
+        if self.estimated_simulation_frames() > 800 or self.objects_spin.value() > 20:
+            self.log_text.append("[gui] Long run expected: reduce Objects/Settle frames for smoke tests before generating a full dataset.")
         self.log_text.append(f"> {blender_path} {' '.join(command_args)}")
+        self.log_text.append("")
         self.process = QProcess(self)
         self.process.setProgram(str(blender_path))
         self.process.setArguments(command_args)
@@ -1042,6 +1258,12 @@ class DatasetGui(QMainWindow):
         self.stop_button.setEnabled(True)
         self.process.start()
 
+    def estimated_simulation_frames(self) -> int:
+        spawn_settle_frames = self.spawn_settle_frames_spin.value()
+        if spawn_settle_frames <= 0:
+            return self.settle_frames_spin.value()
+        return self.settle_frames_spin.value() + max(0, self.objects_spin.value() - 1) * spawn_settle_frames
+
     def build_generator_args(self, output_path: Path) -> list[str]:
         args = [
             "--background",
@@ -1050,6 +1272,8 @@ class DatasetGui(QMainWindow):
             "--",
             "--model",
             self.model_path_edit.text(),
+            "--model-scale",
+            str(self.model_scale_spin.value()),
             "--output",
             self._display_path(output_path),
             "--samples",
@@ -1076,10 +1300,14 @@ class DatasetGui(QMainWindow):
             str(self.objects_per_layer_spin.value()),
             "--spawn-min-distance",
             str(self.spawn_min_distance_spin.value()),
+            "--spawn-settle-frames",
+            str(self.spawn_settle_frames_spin.value()),
             "--collision-margin",
             str(self.collision_margin_spin.value()),
             "--collision-shape",
             self.collision_shape_combo.currentText(),
+            "--object-restitution",
+            str(self.object_restitution_spin.value()),
             "--min-visible-objects",
             str(self.min_visible_objects_spin.value()),
             "--min-visible-points",
@@ -1089,6 +1317,18 @@ class DatasetGui(QMainWindow):
             "--settle-frames",
             str(self.settle_frames_spin.value()),
         ]
+        self._extend_xyz_arg(args, "--depth-camera-location", self.depth_camera_location_spins)
+        self._extend_xyz_arg(args, "--depth-camera-target", self.depth_camera_target_spins)
+        args.extend(["--depth-camera-lens", str(self.depth_camera_lens_spin.value())])
+        self._extend_xyz_arg(args, "--rgb-camera-location", self.rgb_camera_location_spins)
+        self._extend_xyz_arg(args, "--rgb-camera-target", self.rgb_camera_target_spins)
+        args.extend(["--rgb-camera-lens", str(self.rgb_camera_lens_spin.value())])
+        self._extend_xyz_arg(args, "--light-location", self.light_location_spins)
+        args.extend(["--light-energy", str(self.light_energy_spin.value())])
+        args.extend(["--light-size", str(self.light_size_spin.value())])
+        class_name = self.class_name_edit.text().strip()
+        if class_name:
+            args.extend(["--class-name", class_name])
         if self.allow_out_of_bin_filtering_check.isChecked():
             args.append("--allow-out-of-bin-filtering")
         return args

@@ -1,0 +1,40 @@
+seed: 7
+
+object:
+  class_name: bending_pipe
+  model_path: object-model/bending_pipe.stl
+  model_scale: 0.001
+  model_point_count: 1024
+  symmetry_name: bending_pipe
+
+dataset:
+  require_pose: true
+  min_matched_gt_iou: null
+
+model:
+  name: pointnet2_pose
+  input_features: xyz_normal
+  num_points: 1024
+  ops_backend: pytorch3d
+  sa_npoints: [256, 64, 16]
+  sa_nsamples: [32, 32, 32]
+  global_feature_dim: 256
+  aux_channels: 18
+  dropout: 0.2
+
+loss:
+  translation_weight: 1.0
+  rotation_weight: 0.5
+  model_points_weight: 1.0
+  model_points_use_gt_translation: true
+  translation_smooth_l1_beta: 0.01
+
+train:
+  seed: 7
+  device: cuda
+  num_workers: 0
+  epochs: 100
+  batch_size: 16
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  freeze_batchnorm: true

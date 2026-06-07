@@ -15,9 +15,11 @@ import argparse
 import json
 import math
 import random
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import bpy
 import numpy as np
@@ -31,23 +33,36 @@ BACKGROUND_ID = 0
 @dataclass
 class GenerationScene:
     template: bpy.types.Object
-    camera: bpy.types.Object
+    depth_camera: bpy.types.Object
+    rgb_camera: bpy.types.Object
+    class_name: str
 
 
-def parse_args() -> argparse.Namespace:
-    argv = sys.argv
-    if "--" in argv:
-        argv = argv[argv.index("--") + 1 :]
-    else:
-        argv = []
+def synthetic_log(message: str) -> None:
+    print(message, flush=True)
 
+
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--settings-file", help="Load generator settings from a JSON preset before applying CLI overrides.")
+    parser.add_argument("--export-settings", help="Write the effective generator settings to a JSON preset.")
     parser.add_argument("--model", default="object-model/K41144.stl")
+    parser.add_argument("--class-name", help="Semantic class name. Defaults to the model filename stem.")
+    parser.add_argument("--model-scale", type=float, default=1.0, help="Scale applied to STL vertices before simulation. Use 0.001 for millimeter STL files.")
     parser.add_argument("--output", default="synthetic-data/K41144")
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--objects", type=int, default=12)
     parser.add_argument("--width", type=int, default=320)
     parser.add_argument("--height", type=int, default=240)
+    parser.add_argument("--depth-camera-location", type=float, nargs=3, default=(0.0, -0.05, 0.42))
+    parser.add_argument("--depth-camera-target", type=float, nargs=3, default=(0.0, 0.0, 0.025))
+    parser.add_argument("--depth-camera-lens", type=float, default=35.0)
+    parser.add_argument("--rgb-camera-location", type=float, nargs=3, default=(0.0, -0.05, 0.42))
+    parser.add_argument("--rgb-camera-target", type=float, nargs=3, default=(0.0, 0.0, 0.025))
+    parser.add_argument("--rgb-camera-lens", type=float, default=35.0)
+    parser.add_argument("--light-location", type=float, nargs=3, default=(0.0, -0.22, 0.45))
+    parser.add_argument("--light-energy", type=float, default=90.0)
+    parser.add_argument("--light-size", type=float, default=0.45)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--bin-x", type=float, default=0.24)
     parser.add_argument("--bin-y", type=float, default=0.24)
@@ -59,19 +74,82 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--spawn-strategy", choices=("random", "layered"), default="layered")
     parser.add_argument("--objects-per-layer", type=int, default=6)
     parser.add_argument("--spawn-min-distance", type=float, default=0.045)
+    parser.add_argument(
+        "--spawn-settle-frames",
+        type=int,
+        default=35,
+        help="If > 0, enable one active rigid body at a time after this many settle frames before enabling the next object.",
+    )
     parser.add_argument("--collision-margin", type=float, default=0.00002)
     parser.add_argument("--collision-shape", choices=("CONVEX_HULL", "MESH"), default="CONVEX_HULL")
+    parser.add_argument("--object-restitution", type=float, default=0.05, help="Rigid-body bounce/restitution for spawned objects.")
     parser.add_argument("--out-of-bin-tolerance", type=float, default=0.015)
     parser.add_argument(
         "--allow-out-of-bin-filtering",
+        dest="allow_out_of_bin_filtering",
         action="store_true",
         help="Keep old behavior: hide out-of-bin objects and accept the remaining scene if visibility thresholds pass.",
     )
+    parser.add_argument("--no-allow-out-of-bin-filtering", dest="allow_out_of_bin_filtering", action="store_false")
+    parser.set_defaults(allow_out_of_bin_filtering=False)
     parser.add_argument("--min-visible-objects", type=int, default=8)
     parser.add_argument("--min-visible-points", type=int, default=2000)
     parser.add_argument("--max-sample-attempts", type=int, default=8)
     parser.add_argument("--settle-frames", type=int, default=220)
+    return parser
+
+
+def blender_script_argv() -> list[str]:
+    argv = sys.argv
+    if "--" in argv:
+        return argv[argv.index("--") + 1 :]
+    return []
+
+
+def load_settings_file(path: Path, parser: argparse.ArgumentParser) -> dict[str, Any]:
+    with path.open("r", encoding="utf-8") as f:
+        settings = json.load(f)
+    if not isinstance(settings, dict):
+        raise ValueError(f"Settings file must contain a JSON object: {path}")
+
+    valid_keys = {action.dest for action in parser._actions if action.dest != "help"}
+    loaded = {str(key).replace("-", "_"): value for key, value in settings.items()}
+    unknown = sorted(key for key in loaded if key not in valid_keys)
+    if unknown:
+        raise ValueError(f"Unknown generator setting(s) in {path}: {', '.join(unknown)}")
+    return loaded
+
+
+def parse_args() -> argparse.Namespace:
+    argv = blender_script_argv()
+    parser = build_arg_parser()
+    pre_parser = argparse.ArgumentParser(add_help=False)
+    pre_parser.add_argument("--settings-file")
+    pre_args, _unknown = pre_parser.parse_known_args(argv)
+    if pre_args.settings_file:
+        parser.set_defaults(**load_settings_file(Path(pre_args.settings_file), parser))
     return parser.parse_args(argv)
+
+
+def generator_settings_dict(args: argparse.Namespace) -> dict[str, Any]:
+    excluded = {"settings_file", "export_settings"}
+    settings: dict[str, Any] = {}
+    for key, value in sorted(vars(args).items()):
+        if key in excluded:
+            continue
+        if isinstance(value, tuple):
+            settings[key] = list(value)
+        elif isinstance(value, Path):
+            settings[key] = str(value)
+        else:
+            settings[key] = value
+    return settings
+
+
+def sanitize_blender_name(value: str) -> str:
+    sanitized = re.sub(r"[^0-9A-Za-z_]+", "_", value.strip())
+    sanitized = sanitized.strip("_")
+    return sanitized or "object"
 
 
 def clean_scene() -> None:
@@ -109,7 +187,7 @@ def make_material(
     return mat
 
 
-def import_stl(path: Path) -> bpy.types.Object:
+def import_stl(path: Path, class_name: str, model_scale: float) -> bpy.types.Object:
     before = set(bpy.data.objects)
     if hasattr(bpy.ops.wm, "stl_import"):
         bpy.ops.wm.stl_import(filepath=str(path))
@@ -119,19 +197,20 @@ def import_stl(path: Path) -> bpy.types.Object:
     if not imported:
         raise RuntimeError(f"Could not import STL: {path}")
     obj = imported[0]
-    obj.name = "K41144_template"
-    obj.data.name = "K41144_mesh"
-    center_mesh_for_physics(obj)
+    safe_name = sanitize_blender_name(class_name)
+    obj.name = f"{safe_name}_template"
+    obj.data.name = f"{safe_name}_mesh"
+    center_mesh_for_physics(obj, model_scale)
     return obj
 
 
-def center_mesh_for_physics(obj: bpy.types.Object) -> None:
+def center_mesh_for_physics(obj: bpy.types.Object, model_scale: float) -> None:
     """Move mesh vertices around their bbox center while preserving original STL pose metadata.
 
-    Blender rigid bodies use the object origin as the body's center of mass. The K41144 STL
-    has its origin near one end of the part, so without this shift the object behaves like a
-    pendulum and settles upright. We keep the offset so metadata can still report poses for
-    the original STL coordinate frame.
+    Blender rigid bodies use the object origin as the body's center of mass. Some STL files
+    have origins far from the physical center, so without this shift the object can behave
+    like a pendulum. We keep the offset so metadata can still report poses for the original
+    STL coordinate frame.
     """
     vertices = obj.data.vertices
     if not vertices:
@@ -141,9 +220,10 @@ def center_mesh_for_physics(obj: bpy.types.Object) -> None:
     maxs = Vector((max(v.co.x for v in vertices), max(v.co.y for v in vertices), max(v.co.z for v in vertices)))
     center = (mins + maxs) * 0.5
     for vertex in vertices:
-        vertex.co -= center
+        vertex.co = (vertex.co - center) * model_scale
     obj.data.update()
     obj["original_model_center_offset"] = [float(center.x), float(center.y), float(center.z)]
+    obj["model_scale"] = float(model_scale)
 
 
 def configure_rigid_body_margin(obj: bpy.types.Object, collision_margin: float) -> None:
@@ -170,6 +250,7 @@ def add_box(
     obj.rigid_body.friction = 0.9
     obj.rigid_body.restitution = 0.05
     configure_rigid_body_margin(obj, collision_margin)
+    obj.select_set(False)
     return obj
 
 
@@ -228,8 +309,46 @@ def sample_drop_height(
     return random.uniform(min_h, max_h), 0
 
 
+def object_spawn_edge_margin(template: bpy.types.Object, bin_x: float, bin_y: float, collision_margin: float) -> float:
+    if not template.data.vertices:
+        return 0.035
+    radius = max(float(vertex.co.length) for vertex in template.data.vertices)
+    desired = max(0.035, radius + collision_margin)
+    return min(desired, min(bin_x, bin_y) * 0.45)
+
+
+def sample_spawn_xy(
+    bin_x: float,
+    bin_y: float,
+    margin: float,
+    layer_xy: list[tuple[float, float]],
+    spawn_min_distance: float,
+) -> tuple[float, float]:
+    x_min = -bin_x / 2.0 + margin
+    x_max = bin_x / 2.0 - margin
+    y_min = -bin_y / 2.0 + margin
+    y_max = bin_y / 2.0 - margin
+    if x_min > x_max or y_min > y_max:
+        return 0.0, 0.0
+
+    best_candidate = (random.uniform(x_min, x_max), random.uniform(y_min, y_max))
+    best_distance = -1.0
+    for _ in range(120):
+        candidate = (random.uniform(x_min, x_max), random.uniform(y_min, y_max))
+        if not layer_xy:
+            return candidate
+        nearest = min(math.dist(candidate, existing) for existing in layer_xy)
+        if nearest >= spawn_min_distance:
+            return candidate
+        if nearest > best_distance:
+            best_candidate = candidate
+            best_distance = nearest
+    return best_candidate
+
+
 def create_object_instances(
     template: bpy.types.Object,
+    class_name: str,
     count: int,
     bin_x: float,
     bin_y: float,
@@ -240,22 +359,25 @@ def create_object_instances(
     spawn_strategy: str,
     objects_per_layer: int,
     spawn_min_distance: float,
+    spawn_settle_frames: int,
     collision_margin: float,
     collision_shape: str,
+    object_restitution: float,
 ) -> list[bpy.types.Object]:
-    mat = make_material("mat_k41144_black_metal", (0.015, 0.014, 0.013, 1.0), metallic=0.85, roughness=0.85)
+    safe_name = sanitize_blender_name(class_name)
+    mat = make_material(f"mat_{safe_name}_black_metal", (0.015, 0.014, 0.013, 1.0), metallic=0.85, roughness=0.85)
     template.data.materials.clear()
     template.data.materials.append(mat)
 
     objects = []
     spawn_xy_by_layer: dict[int, list[tuple[float, float]]] = {}
+    margin = object_spawn_edge_margin(template, bin_x, bin_y, collision_margin)
     for idx in range(count):
         obj = template.copy()
         obj.data = template.data
-        obj.name = f"K41144_{idx + 1:03d}"
+        obj.name = f"{safe_name}_{idx + 1:03d}"
         obj.hide_viewport = False
         obj.hide_render = False
-        margin = 0.035
         z, layer = sample_drop_height(
             idx,
             count,
@@ -267,22 +389,16 @@ def create_object_instances(
             objects_per_layer,
         )
         layer_xy = spawn_xy_by_layer.setdefault(layer, [])
-        x = random.uniform(-bin_x / 2.0 + margin, bin_x / 2.0 - margin)
-        y = random.uniform(-bin_y / 2.0 + margin, bin_y / 2.0 - margin)
-        for _ in range(80):
-            candidate = (
-                random.uniform(-bin_x / 2.0 + margin, bin_x / 2.0 - margin),
-                random.uniform(-bin_y / 2.0 + margin, bin_y / 2.0 - margin),
-            )
-            if all(math.dist(candidate, existing) >= spawn_min_distance for existing in layer_xy):
-                x, y = candidate
-                break
+        x, y = sample_spawn_xy(bin_x, bin_y, margin, layer_xy, spawn_min_distance)
         layer_xy.append((x, y))
         obj.location = (x, y, z)
         obj["spawn_layer"] = layer
         obj["spawn_height"] = z
+        obj["spawn_edge_margin"] = margin
         obj.rotation_euler = random_rotation()
         bpy.context.collection.objects.link(obj)
+        bpy.context.view_layer.update()
+        bpy.ops.object.select_all(action="DESELECT")
         bpy.context.view_layer.objects.active = obj
         obj.select_set(True)
         bpy.ops.rigidbody.object_add()
@@ -290,12 +406,20 @@ def create_object_instances(
         obj.rigid_body.type = "ACTIVE"
         obj.rigid_body.mass = 0.08
         obj.rigid_body.friction = 0.85
-        obj.rigid_body.restitution = 0.05
+        obj.rigid_body.restitution = object_restitution
         obj.rigid_body.linear_damping = 0.35
         obj.rigid_body.angular_damping = 0.45
         obj.rigid_body.collision_shape = collision_shape
         configure_rigid_body_margin(obj, collision_margin)
+        obj["spawn_frame"] = int(bpy.context.scene.frame_current)
         objects.append(obj)
+        if idx == 0 or (idx + 1) % 5 == 0 or idx + 1 == count:
+            synthetic_log(
+                f"[synthetic] spawned object {idx + 1}/{count} "
+                f"at frame {bpy.context.scene.frame_current}"
+            )
+        if spawn_settle_frames > 0 and idx < count - 1:
+            advance_scene_frames(spawn_settle_frames)
 
     template.hide_viewport = True
     template.hide_render = True
@@ -307,16 +431,27 @@ def look_at(obj: bpy.types.Object, target: Vector) -> None:
     obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
 
 
-def setup_camera(width: int, height: int) -> bpy.types.Object:
-    bpy.ops.object.camera_add(location=(0.0, -0.05, 0.42))
+def setup_camera(
+    name: str,
+    width: int,
+    height: int,
+    location: tuple[float, float, float],
+    target: tuple[float, float, float],
+    lens: float,
+) -> bpy.types.Object:
+    bpy.ops.object.camera_add(location=location)
     camera = bpy.context.object
-    look_at(camera, Vector((0.0, 0.0, 0.025)))
-    camera.data.lens = 35.0
+    camera.name = name
+    look_at(camera, Vector(target))
+    camera.data.lens = lens
     camera.data.sensor_width = 32.0
     camera.data.clip_start = 0.01
     camera.data.clip_end = 1.50
-    bpy.context.scene.camera = camera
+    setup_render_settings(width, height)
+    return camera
 
+
+def setup_render_settings(width: int, height: int) -> None:
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.samples = 48
@@ -328,15 +463,14 @@ def setup_camera(width: int, height: int) -> bpy.types.Object:
     scene.render.resolution_x = width
     scene.render.resolution_y = height
     scene.render.film_transparent = False
-    return camera
 
 
-def setup_lighting() -> None:
-    bpy.ops.object.light_add(type="AREA", location=(0.0, -0.22, 0.45))
+def setup_lighting(location: tuple[float, float, float], energy: float, size: float) -> None:
+    bpy.ops.object.light_add(type="AREA", location=location)
     light = bpy.context.object
     light.name = "large_softbox"
-    light.data.energy = 90
-    light.data.size = 0.45
+    light.data.energy = energy
+    light.data.size = size
 
     bpy.context.scene.world.color = (0.018, 0.018, 0.02)
 
@@ -369,6 +503,19 @@ def settle_scene(frames: int) -> None:
     scene.frame_set(1)
     for frame in range(1, frames + 1):
         scene.frame_set(frame)
+
+
+def advance_scene_frames(frames: int) -> None:
+    scene = bpy.context.scene
+    start = scene.frame_current
+    for frame in range(start + 1, start + frames + 1):
+        scene.frame_set(frame)
+
+
+def simulation_frame_count(args: argparse.Namespace) -> int:
+    if args.spawn_settle_frames <= 0:
+        return args.settle_frames
+    return args.settle_frames + max(0, args.objects - 1) * args.spawn_settle_frames
 
 
 def keep_objects_inside_bin(
@@ -460,7 +607,9 @@ def matrix_to_list(matrix: Matrix) -> list[list[float]]:
 
 def original_model_to_body_matrix(obj: bpy.types.Object) -> Matrix:
     offset = obj.get("original_model_center_offset", [0.0, 0.0, 0.0])
-    return Matrix.Translation(Vector((-float(offset[0]), -float(offset[1]), -float(offset[2]))))
+    model_scale = float(obj.get("model_scale", 1.0))
+    scale_matrix = Matrix.Diagonal((model_scale, model_scale, model_scale, 1.0))
+    return scale_matrix @ Matrix.Translation(Vector((-float(offset[0]), -float(offset[1]), -float(offset[2]))))
 
 
 def save_ppm(path: Path, rgb: np.ndarray) -> None:
@@ -567,7 +716,8 @@ def raycast_sensor_data(
     }
 
 
-def render_rgb(path: Path) -> None:
+def render_rgb(path: Path, camera: bpy.types.Object) -> None:
+    bpy.context.scene.camera = camera
     bpy.context.scene.render.filepath = str(path)
     bpy.ops.render.render(write_still=True)
 
@@ -575,18 +725,20 @@ def render_rgb(path: Path) -> None:
 def write_sample_outputs(
     sample_dir: Path,
     model_path: Path,
-    camera: bpy.types.Object,
+    class_name: str,
+    depth_camera: bpy.types.Object,
+    rgb_camera: bpy.types.Object,
     objects: list[bpy.types.Object],
     width: int,
     height: int,
-    settings: dict[str, float | int | str | None],
+    settings: dict[str, Any],
     sensor: dict[str, np.ndarray | dict[str, float]] | None = None,
 ) -> None:
     sample_dir.mkdir(parents=True, exist_ok=True)
-    render_rgb(sample_dir / "rgb.png")
+    render_rgb(sample_dir / "rgb.png", rgb_camera)
 
     if sensor is None:
-        sensor = raycast_sensor_data(camera, objects, width, height)
+        sensor = raycast_sensor_data(depth_camera, objects, width, height)
     np.savez_compressed(
         sample_dir / "sensor_data.npz",
         depth_m=sensor["depth_m"],
@@ -632,11 +784,17 @@ def write_sample_outputs(
 
     metadata = {
         "model_path": str(model_path),
-        "class_name": "K41144",
+        "class_name": class_name,
         "class_id": OBJECT_CLASS_ID,
         "camera_intrinsics": sensor["intrinsics"],
-        "camera_to_world": matrix_to_list(camera.matrix_world),
-        "world_to_camera": matrix_to_list(camera.matrix_world.inverted()),
+        "camera_to_world": matrix_to_list(depth_camera.matrix_world),
+        "world_to_camera": matrix_to_list(depth_camera.matrix_world.inverted()),
+        "depth_camera_intrinsics": sensor["intrinsics"],
+        "depth_camera_to_world": matrix_to_list(depth_camera.matrix_world),
+        "depth_world_to_camera": matrix_to_list(depth_camera.matrix_world.inverted()),
+        "rgb_camera_intrinsics": camera_intrinsics(rgb_camera, width, height),
+        "rgb_camera_to_world": matrix_to_list(rgb_camera.matrix_world),
+        "rgb_world_to_camera": matrix_to_list(rgb_camera.matrix_world.inverted()),
         "settings": settings,
         "object_count": len(objects),
         "visible_object_point_count": int(np.asarray(sensor["point_instance_ids"]).shape[0]),
@@ -653,10 +811,12 @@ def write_sample_outputs(
             "label_overlay_png": "label_overlay.png",
         },
     }
-    world_to_camera = camera.matrix_world.inverted()
+    depth_world_to_camera = depth_camera.matrix_world.inverted()
+    rgb_world_to_camera = rgb_camera.matrix_world.inverted()
     for idx, obj in enumerate(objects):
         original_to_body = original_model_to_body_matrix(obj)
         original_to_world = obj.matrix_world @ original_to_body
+        object_to_depth_camera = depth_world_to_camera @ original_to_world
         metadata["instances"].append(
             {
                 "instance_id": idx + 1,
@@ -664,13 +824,19 @@ def write_sample_outputs(
                 "class_id": OBJECT_CLASS_ID,
                 "collision_shape": obj.rigid_body.collision_shape,
                 "collision_margin_m": float(obj.rigid_body.collision_margin),
+                "object_restitution": float(obj.rigid_body.restitution),
                 "spawn_layer": int(obj.get("spawn_layer", -1)),
                 "spawn_height": float(obj.get("spawn_height", 0.0)),
+                "spawn_frame": int(obj.get("spawn_frame", 1)),
+                "spawn_edge_margin": float(obj.get("spawn_edge_margin", 0.0)),
                 "original_model_center_offset": [float(v) for v in obj.get("original_model_center_offset", [0.0, 0.0, 0.0])],
+                "model_scale": float(obj.get("model_scale", 1.0)),
                 "original_model_to_body": matrix_to_list(original_to_body),
                 "body_to_world": matrix_to_list(obj.matrix_world),
                 "object_to_world": matrix_to_list(original_to_world),
-                "object_to_camera": matrix_to_list(world_to_camera @ original_to_world),
+                "object_to_camera": matrix_to_list(object_to_depth_camera),
+                "object_to_depth_camera": matrix_to_list(object_to_depth_camera),
+                "object_to_rgb_camera": matrix_to_list(rgb_world_to_camera @ original_to_world),
             }
         )
     with (sample_dir / "metadata.json").open("w", encoding="utf-8") as f:
@@ -690,10 +856,26 @@ def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> Genera
     clean_scene()
     configure_physics(args.settle_frames)
     create_bin(args.bin_x, args.bin_y, args.bin_wall_height, args.collision_margin)
-    template = import_stl(model_path)
-    camera = setup_camera(args.width, args.height)
-    setup_lighting()
-    return GenerationScene(template=template, camera=camera)
+    template = import_stl(model_path, args.class_name, args.model_scale)
+    depth_camera = setup_camera(
+        "depth_camera",
+        args.width,
+        args.height,
+        tuple(args.depth_camera_location),
+        tuple(args.depth_camera_target),
+        args.depth_camera_lens,
+    )
+    rgb_camera = setup_camera(
+        "rgb_camera",
+        args.width,
+        args.height,
+        tuple(args.rgb_camera_location),
+        tuple(args.rgb_camera_target),
+        args.rgb_camera_lens,
+    )
+    bpy.context.scene.camera = rgb_camera
+    setup_lighting(tuple(args.light_location), args.light_energy, args.light_size)
+    return GenerationScene(template=template, depth_camera=depth_camera, rgb_camera=rgb_camera, class_name=args.class_name)
 
 
 def build_sample(
@@ -707,9 +889,15 @@ def build_sample(
     seed = args.seed + sample_idx * 1009 + attempt_idx
     random.seed(seed)
     np.random.seed(seed)
-    reset_physics_cache(args.settle_frames)
+    total_frames = simulation_frame_count(args)
+    synthetic_log(
+        f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
+        f"objects={args.objects}, simulation_frames={total_frames}"
+    )
+    reset_physics_cache(total_frames)
     objects = create_object_instances(
         scene_context.template,
+        scene_context.class_name,
         args.objects,
         args.bin_x,
         args.bin_y,
@@ -720,12 +908,21 @@ def build_sample(
         args.spawn_strategy,
         args.objects_per_layer,
         args.spawn_min_distance,
+        args.spawn_settle_frames,
         args.collision_margin,
         args.collision_shape,
+        args.object_restitution,
     )
     all_objects = objects
     try:
-        settle_scene(args.settle_frames)
+        if args.spawn_settle_frames > 0:
+            synthetic_log(
+                f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
+                f"final settling {args.settle_frames} frames from frame {bpy.context.scene.frame_current}"
+            )
+            advance_scene_frames(args.settle_frames)
+        else:
+            settle_scene(args.settle_frames)
         out_of_bin_objects = find_out_of_bin_objects(objects, args.bin_x, args.bin_y, args.out_of_bin_tolerance)
         stats: dict[str, int | str | list[int]] = {
             "spawned_objects": len(objects),
@@ -740,7 +937,7 @@ def build_sample(
             hide_objects(out_of_bin_objects)
             objects = [obj for obj in objects if obj not in out_of_bin_objects]
 
-        sensor = raycast_sensor_data(scene_context.camera, objects, args.width, args.height)
+        sensor = raycast_sensor_data(scene_context.depth_camera, objects, args.width, args.height)
         stats.update(sample_visibility_stats(sensor))
         target_visible_objects = min(args.objects, args.min_visible_objects)
         if int(stats["visible_objects"]) < target_visible_objects or int(stats["visible_points"]) < args.min_visible_points:
@@ -760,8 +957,20 @@ def build_sample(
             "spawn_strategy": args.spawn_strategy,
             "objects_per_layer": args.objects_per_layer,
             "spawn_min_distance": args.spawn_min_distance,
+            "spawn_settle_frames": args.spawn_settle_frames,
             "collision_margin": args.collision_margin,
+            "model_scale": args.model_scale,
             "collision_shape": args.collision_shape,
+            "object_restitution": args.object_restitution,
+            "depth_camera_location": list(args.depth_camera_location),
+            "depth_camera_target": list(args.depth_camera_target),
+            "depth_camera_lens": args.depth_camera_lens,
+            "rgb_camera_location": list(args.rgb_camera_location),
+            "rgb_camera_target": list(args.rgb_camera_target),
+            "rgb_camera_lens": args.rgb_camera_lens,
+            "light_location": list(args.light_location),
+            "light_energy": args.light_energy,
+            "light_size": args.light_size,
             "out_of_bin_tolerance": args.out_of_bin_tolerance,
             "allow_out_of_bin_filtering": args.allow_out_of_bin_filtering,
             "out_of_bin_policy": "filter" if args.allow_out_of_bin_filtering else "reject_attempt",
@@ -769,12 +978,15 @@ def build_sample(
             "min_visible_objects": args.min_visible_objects,
             "min_visible_points": args.min_visible_points,
             "settle_frames": args.settle_frames,
+            "simulation_frames": total_frames,
         }
         sample_dir = output_dir / f"sample_{sample_idx:06d}"
         write_sample_outputs(
             sample_dir,
             model_path,
-            scene_context.camera,
+            scene_context.class_name,
+            scene_context.depth_camera,
+            scene_context.rgb_camera,
             objects,
             args.width,
             args.height,
@@ -787,20 +999,35 @@ def build_sample(
 
 
 def main() -> None:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
     args = parse_args()
     project_root = Path.cwd()
     model_path = (project_root / args.model).resolve()
     output_dir = (project_root / args.output).resolve()
     if not model_path.exists():
         raise FileNotFoundError(model_path)
+    args.class_name = args.class_name or model_path.stem
+    if args.export_settings:
+        settings_path = (project_root / args.export_settings).resolve()
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
+        with settings_path.open("w", encoding="utf-8") as f:
+            json.dump(generator_settings_dict(args), f, indent=2)
+        synthetic_log(f"[synthetic] exported generator settings: {settings_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
     scene_context = setup_generation_scene(args, model_path)
+    total_frames = simulation_frame_count(args)
+    synthetic_log(
+        f"[synthetic] config: samples={args.samples}, objects={args.objects}, "
+        f"resolution={args.width}x{args.height}, collision_shape={args.collision_shape}, "
+        f"spawn_settle_frames={args.spawn_settle_frames}, simulation_frames={total_frames}"
+    )
 
     accepted = 0
     rejected = 0
     rejection_stats: list[dict[str, int | str | list[int]]] = []
     for sample_idx in range(args.samples):
-        print(f"[synthetic] generating sample {sample_idx + 1}/{args.samples}")
+        synthetic_log(f"[synthetic] generating sample {sample_idx + 1}/{args.samples}")
         last_stats: dict[str, int | str | list[int]] = {"visible_objects": 0, "visible_points": 0}
         for attempt_idx in range(args.max_sample_attempts):
             ok, stats = build_sample(args, scene_context, sample_idx, attempt_idx, model_path, output_dir)
@@ -808,11 +1035,11 @@ def main() -> None:
             if ok:
                 accepted += 1
                 if attempt_idx > 0:
-                    print(f"[synthetic] accepted sample {sample_idx:06d} after {attempt_idx + 1} attempts: {stats}")
+                    synthetic_log(f"[synthetic] accepted sample {sample_idx:06d} after {attempt_idx + 1} attempts: {stats}")
                 break
             rejected += 1
             rejection_stats.append(stats)
-            print(f"[synthetic] rejected sample {sample_idx:06d} attempt {attempt_idx + 1}: {stats}")
+            synthetic_log(f"[synthetic] rejected sample {sample_idx:06d} attempt {attempt_idx + 1}: {stats}")
         else:
             raise RuntimeError(
                 f"Could not generate sample_{sample_idx:06d} after {args.max_sample_attempts} attempts. "
@@ -821,6 +1048,7 @@ def main() -> None:
 
     summary = {
         "model": str(model_path),
+        "class_name": args.class_name,
         "output": str(output_dir),
         "samples": args.samples,
         "objects_per_scene": args.objects,
@@ -832,8 +1060,20 @@ def main() -> None:
         "spawn_strategy": args.spawn_strategy,
         "objects_per_layer": args.objects_per_layer,
         "spawn_min_distance": args.spawn_min_distance,
+        "spawn_settle_frames": args.spawn_settle_frames,
         "collision_margin": args.collision_margin,
+        "model_scale": args.model_scale,
         "collision_shape": args.collision_shape,
+        "object_restitution": args.object_restitution,
+        "depth_camera_location": list(args.depth_camera_location),
+        "depth_camera_target": list(args.depth_camera_target),
+        "depth_camera_lens": args.depth_camera_lens,
+        "rgb_camera_location": list(args.rgb_camera_location),
+        "rgb_camera_target": list(args.rgb_camera_target),
+        "rgb_camera_lens": args.rgb_camera_lens,
+        "light_location": list(args.light_location),
+        "light_energy": args.light_energy,
+        "light_size": args.light_size,
         "out_of_bin_tolerance": args.out_of_bin_tolerance,
         "allow_out_of_bin_filtering": args.allow_out_of_bin_filtering,
         "out_of_bin_policy": "filter" if args.allow_out_of_bin_filtering else "reject_attempt",
@@ -841,13 +1081,15 @@ def main() -> None:
         "min_visible_objects": args.min_visible_objects,
         "min_visible_points": args.min_visible_points,
         "max_sample_attempts": args.max_sample_attempts,
+        "settle_frames": args.settle_frames,
+        "simulation_frames": total_frames,
         "accepted_samples": accepted,
         "rejected_attempts": rejected,
         "rejection_stats": rejection_stats[:25],
     }
     with (output_dir / "dataset_summary.json").open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)
-    print(f"[synthetic] done: {output_dir}")
+    synthetic_log(f"[synthetic] done: {output_dir}")
 
 
 if __name__ == "__main__":

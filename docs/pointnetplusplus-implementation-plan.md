@@ -1454,6 +1454,8 @@ Interpretation:
 
 ### Phase 11: Model Completion Criteria
 
+Status: Done.
+
 The PointNet++ semantic model is considered complete for the first milestone only when all criteria below are met:
 
 - Raw dataset passes validation.
@@ -1473,14 +1475,80 @@ The PointNet++ semantic model is considered complete for the first milestone onl
   - test metrics
   - known failure cases
 
+Current sign-off result:
+
+```text
+experiment: experiments/pointnet2_semseg_k41144_20260606_180212
+checkpoint: experiments/pointnet2_semseg_k41144_20260606_180212/checkpoints/best.pt
+dataset: processed-data/pointnet2_semseg_k41144
+config: configs/train/pointnet2_semseg_k41144.yaml
+visual sign-off: experiments/pointnet2_semseg_k41144_20260606_180212/phase11_visual_signoff
+sign-off summary: experiments/pointnet2_semseg_k41144_20260606_180212/phase11_visual_signoff/phase11_signoff_summary.json
+```
+
+Visual inspection artifacts:
+
+```text
+val_error_contact_sheet.png
+test_error_contact_sheet.png
+inference_prediction_contact_sheet.png
+```
+
+Validation preview metrics:
+
+```text
+sample_count=8
+mean_iou=0.9960
+object_iou=0.9972
+object_recall=0.9982
+confusion_matrix=[[45789,83],[155,85045]]
+```
+
+Test preview metrics:
+
+```text
+sample_count=7
+mean_iou=0.9939
+object_iou=0.9957
+object_recall=0.9966
+confusion_matrix=[[40074,64],[254,74296]]
+```
+
+Inference smoke checks:
+
+```text
+processed sample_000011:
+  points=16384
+  predicted_object_points=10632
+  ground_truth_object_points=10650
+  ops_backend=pytorch3d
+
+raw sample_000011:
+  points=16384
+  predicted_object_points=6403
+  ground_truth_object_points=6440
+  ops_backend=pytorch3d
+```
+
+Visual sign-off interpretation:
+
+- Validation and test error contact sheets show no visible large-scale semantic collapse.
+- No systematic object/background inversion was observed.
+- Remaining visible errors are sparse and boundary-like in the inspected previews.
+- No concrete synthetic-preview failure case is recorded for this semantic milestone.
+
+Residual risk:
+
+- This is a synthetic-only semantic sign-off.
+- Real depth sensor noise, reflective artifacts, and real bin-picking domain shift are not validated yet.
+
 ## Immediate Next Tasks
 
 Implement these in order:
 
-1. Visually inspect validation/test/inference PLY previews before signing off semantic segmentation.
-2. Record any visible failure cases in this plan.
-3. Start the next model branch for instance segmentation or PPRNet++-style pose regression after semantic segmentation is signed off.
-4. Begin designing the pose-estimation target format derived from `object_to_camera` and instance labels.
+1. Start the next model branch for instance segmentation.
+2. Begin designing the pose-estimation target format derived from `object_to_camera` and instance labels.
+3. Keep synthetic-to-real validation as an explicit later milestone once real sensor samples are available.
 
 ## Resolved Decisions
 

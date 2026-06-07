@@ -47,10 +47,16 @@ Main idea from the paper:
 
 ## Object Model
 
-The object model is:
+The primary object model is:
 
 ```text
 object-model/K41144.stl
+```
+
+A second design/test model is also available:
+
+```text
+object-model/bending_pipe.stl
 ```
 
 Observed STL bounding box:
@@ -59,7 +65,11 @@ Observed STL bounding box:
 approx size: 30 mm x 93.6 mm x 20 mm
 ```
 
-The STL is assumed to be in real metric scale.
+`K41144.stl` is in real metric scale. `bending_pipe.stl` is authored in millimeters and must be generated with:
+
+```text
+--model-scale 0.001
+```
 
 Important issue found:
 
@@ -84,13 +94,18 @@ scripts/generate_synthetic_blender.py
 
 Purpose:
 
-- Load `K41144.stl`.
+- Load the requested STL model.
+- Use `--class-name` for semantic metadata and Blender object names. If omitted, class name defaults to the STL filename stem.
+- Use `--model-scale` to convert STL vertex units before simulation while preserving original-model pose metadata.
 - Recenter mesh for correct physics.
 - Create a bin/container.
 - Spawn many copies of the object.
 - Run Blender rigid-body simulation.
-- Render RGB visual reference.
-- Raycast from the camera to export depth, masks, normals, point cloud and labels.
+- When `--spawn-settle-frames > 0`, spawn incrementally by creating one active rigid body, advancing the simulation, then creating the next active body. Previously spawned objects remain active; they are not converted to passive colliders.
+- Use an object-aware spawn edge margin and a best-candidate fallback when the requested per-layer spawn distance cannot be fully satisfied inside the bin.
+- Render RGB visual reference from the RGB camera.
+- Raycast from the depth camera to export depth, masks, normals, point cloud and labels.
+- Store depth-camera and RGB-camera intrinsics/extrinsics separately while keeping legacy `camera_intrinsics`, `camera_to_world`, `world_to_camera`, and `object_to_camera` aliases for the depth camera.
 - Export object pose ground truth.
 - Reject/retry bad samples if any object leaves the bin or too few objects/points are visible.
 - Keep the static Blender scene loaded once per generator run; per attempt only dynamic object copies are spawned and deleted.
@@ -103,12 +118,22 @@ Recommended generation command:
 
 Important generator options:
 
+- `--model`: STL model path. Default remains `object-model/K41144.stl`.
+- `--class-name`: semantic class name recorded in metadata. Defaults to the STL filename stem.
+- `--model-scale`: scale applied to STL vertices before simulation. Use `0.001` for millimeter-authored STL files such as `bending_pipe.stl`.
+- `--depth-camera-location`, `--depth-camera-target`, `--depth-camera-lens`: camera used for depth, masks, normals, point cloud, and pose labels.
+- `--rgb-camera-location`, `--rgb-camera-target`, `--rgb-camera-lens`: camera used for `rgb.png`.
+- `--light-location`, `--light-energy`, `--light-size`: area-light controls.
+- `--settings-file`: load a JSON generator preset before applying explicit CLI overrides.
+- `--export-settings`: write the effective generator settings to a JSON preset.
 - `--samples`: number of accepted samples to write.
 - `--objects`: number of object copies to spawn before filtering.
 - `--spawn-strategy layered`: spreads initial objects into height bands to avoid explosive overlaps.
 - `--objects-per-layer`: number of objects per initial height band.
+- `--spawn-settle-frames`: default `35`. If greater than zero, enable one active rigid body at a time after this many settle frames before enabling the next object. Earlier objects remain active, so the pile can keep adjusting while later objects fall. Use `0` only when intentionally reverting to the old batch-spawn behavior for comparison.
 - `--drop-height-min`, `--drop-height-max`: random spawn height range.
 - `--collision-margin`: rigid-body margin in meters. Current recommended value is `0.00002`, or 0.02 mm.
+- `--object-restitution`: rigid-body bounce/restitution for spawned objects. Lower values reduce rebounds.
 - `--out-of-bin-tolerance`: tolerance around bin x/y bounds for post-physics world-bbox checks.
 - `--allow-out-of-bin-filtering`: optional legacy/debug behavior that hides out-of-bin objects and accepts the remaining scene if visibility thresholds pass. Do not use it for training datasets. Default behavior is stricter: reject the whole attempt.
 - `--min-visible-objects`: reject samples with fewer visible instances.
@@ -200,6 +225,8 @@ scripts/dataset_gui.py
 Purpose:
 
 - Run the Blender generator from a local desktop UI.
+- Expose generator `--class-name`, `--model-scale`, depth-camera pose, RGB-camera pose, light controls, spawn settle frames, and object restitution in the Generation group so non-K41144 models and different sensor/physics setups can be generated without editing the script.
+- Import/export generator presets as JSON from the Generation group. Preset keys match the generator CLI setting names, so the same file can be reused with `--settings-file`.
 - Stream Blender generation logs while the process runs.
 - Open any raw dataset folder and list `sample_xxxxxx` samples.
 - Preview `rgb.png`, `label_overlay.png`, `depth_preview.png`, `instance_mask.png`, and `normal_camera.png`.
@@ -364,6 +391,9 @@ Cause:
 Fix:
 
 - Add `--spawn-strategy layered`.
+- Add `--spawn-settle-frames` for sequential active spawning: each object is enabled after a delay, while previously spawned objects remain active rigid bodies.
+- Add object-aware spawn edge margin and best-candidate XY sampling, so long objects such as `bending_pipe` do not spawn too close to the bin wall and impossible `spawn_min_distance` values do not fall back to arbitrary random positions.
+- Add `--object-restitution` so bounce can be reduced for difficult object/bin combinations.
 - Add stricter inside-bin filtering using `bin_x / 2 + out_of_bin_tolerance`.
 - Add reject/retry thresholds.
 - Later update: replace silent filtering with post-physics world-space bbox rejection. If any object leaves the bin, reject the whole attempt by default.
@@ -441,6 +471,74 @@ The older `synthetic-data/K41144/` 100-sample dataset was audited:
 Use the old dataset only for smoke tests.
 
 For real raw-data generation, regenerate with the latest generator command in this file.
+
+Additional bending_pipe dataset created for instance-segmentation design checks:
+
+```text
+raw: synthetic-data/bending_pipe
+processed: processed-data/pointnet2_semseg_bending_pipe
+config: configs/train/pointnet2_semseg_bending_pipe.yaml
+model: object-model/bending_pipe.stl
+model_scale: 0.001
+```
+
+Generation profile:
+
+```text
+samples=30
+objects=6
+bin_x=0.36
+bin_y=0.36
+bin_wall_height=0.18
+drop_height_min=0.08
+drop_height_max=0.18
+spawn_strategy=layered
+objects_per_layer=3
+spawn_min_distance=0.08
+collision_margin=0.00002
+min_visible_objects=3
+min_visible_points=1500
+settle_frames=180
+```
+
+Validation result:
+
+```text
+raw validation: 30/30 OK
+visible objects: min=5, median=6, max=6
+visible points: min=8777, median=10725.5, max=11625
+processed split: train/val/test = 24/3/3
+processed points/sample = 16384
+sampled object/background = 10650/5734
+instance audit: pass
+instances = 178
+instances below 64 points = 0
+instances below 32 points = 0
+```
+
+K41144 and bending_pipe should be treated as separate single-class datasets. Do not mix them unless a future multi-class experiment explicitly requires it.
+
+Recent bending_pipe generator finding:
+
+- `synthetic-data/generator_preset_bending_pipe.json` uses `objects=30`, `objects_per_layer=7`, `spawn_min_distance=0.25`, `drop_height_max=1.0`, and a `0.42 x 0.32 m` bin.
+- That preset is physically aggressive for `bending_pipe`: the requested per-layer distance is larger than the practical spawn region after edge margin, the drop height creates high-energy impacts, and 30 long curved parts create high reject rates.
+- A smoke run with the corrected active sequential spawn and a safer 12-object profile passed validation:
+
+```text
+output: synthetic-data/bending_pipe_active_spawn_stable_12obj
+objects=12
+drop_height_min=0.18
+drop_height_max=0.45
+objects_per_layer=4
+spawn_min_distance=0.09
+spawn_settle_frames=30
+settle_frames=240
+validation: OK
+visible_objects=12
+out_of_bin_samples=0
+```
+
+For production-scale bending_pipe generation, prefer increasing object count gradually from this profile, raising `max_sample_attempts`, and only using 30 objects after a validation run shows an acceptable reject rate.
 
 ## Training Dataset Direction
 

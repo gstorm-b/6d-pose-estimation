@@ -90,6 +90,51 @@ class FeaturePropagation(nn.Module):
         return self.mlp(interpolated)
 
 
+class PointNet2Backbone(nn.Module):
+    """Reusable PointNet++ encoder-decoder that returns per-point features."""
+
+    output_channels = 64
+
+    def __init__(
+        self,
+        input_channels: int = 6,
+        sa_npoints: tuple[int, int, int] = (4096, 1024, 256),
+        sa_nsamples: tuple[int, int, int] = (32, 32, 32),
+        ops_backend: str = "pure_torch",
+    ) -> None:
+        super().__init__()
+        if input_channels < 3:
+            raise ValueError("input_channels must include xyz and be at least 3")
+        extra_channels = input_channels - 3
+        self.input_channels = input_channels
+        self.ops_backend = build_pointnet2_ops_backend(ops_backend)
+        self.ops_backend_name = self.ops_backend.name
+
+        self.sa1 = SetAbstraction(sa_npoints[0], sa_nsamples[0], 3 + extra_channels, [64, 64, 64], self.ops_backend)
+        self.sa2 = SetAbstraction(sa_npoints[1], sa_nsamples[1], 3 + 64, [128, 128, 128], self.ops_backend)
+        self.sa3 = SetAbstraction(sa_npoints[2], sa_nsamples[2], 3 + 128, [256, 256, 256], self.ops_backend)
+
+        self.fp3 = FeaturePropagation(128 + 256, [256, 128], self.ops_backend)
+        self.fp2 = FeaturePropagation(64 + 128, [128, 64], self.ops_backend)
+        self.fp1 = FeaturePropagation(extra_channels + 64, [64, 64], self.ops_backend)
+
+    def forward(self, point_features: torch.Tensor) -> torch.Tensor:
+        """Return per-point features with shape `(B, 64, N)`."""
+
+        if point_features.ndim != 3 or point_features.shape[-1] < 3:
+            raise ValueError(f"expected point tensor `(B, N, C>=3)`, got {tuple(point_features.shape)}")
+        xyz0 = point_features[:, :, :3].contiguous()
+        features0 = point_features[:, :, 3:].transpose(1, 2).contiguous() if point_features.shape[-1] > 3 else None
+
+        xyz1, features1 = self.sa1(xyz0, features0)
+        xyz2, features2 = self.sa2(xyz1, features1)
+        xyz3, features3 = self.sa3(xyz2, features2)
+
+        features2_up = self.fp3(xyz2, xyz3, features2, features3)
+        features1_up = self.fp2(xyz1, xyz2, features1, features2_up)
+        return self.fp1(xyz0, xyz1, features0, features1_up)
+
+
 class PointNet2SemSeg(nn.Module):
     """PointNet++ semantic segmentation for `(B, N, C)` point tensors."""
 
