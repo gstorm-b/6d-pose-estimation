@@ -13,6 +13,7 @@ docs/pointnetplusplus-implementation-plan.md
 docs/pointnet2-instance-segmentation-plan.md
 docs/pointnet2-pose-estimation-plan.md
 docs/dataset-build-and-test-guide.md
+docs/pose-estimation-completion-and-accuracy-plan.md
 ```
 
 Then inspect the current user request, usually under:
@@ -45,6 +46,7 @@ docs/pointnetplusplus-implementation-plan.md
 docs/pointnet2-instance-segmentation-plan.md
 docs/pointnet2-pose-estimation-plan.md
 docs/dataset-build-and-test-guide.md
+docs/pose-estimation-completion-and-accuracy-plan.md
 ```
 
 and then look for current `configs/`, `src/`, `scripts/`, `processed-data/`, and `experiments/` folders before assuming they exist.
@@ -311,11 +313,50 @@ bending_pipe predicted crops:
   all predicted crops:    ADD 18.456 mm, translation 18.612 mm, ADD_0.1d success 0.714
 ```
 
-Remaining gap:
+Phase 20 optional refinement:
 
-- ADD_0.1d target is met on GT-crop test for both objects.
-- Strict translation `< 5 mm` is still not fully met.
-- Next improvement should add optional ICP/refinement or stronger translation supervision and report refined pose separately from raw keypoint-voting pose.
+```text
+Preset:
+  configs/eval/pose_refinement_defaults.json
+  method hybrid, distance_threshold_fraction 0.16, max_translation_delta_fraction 0.20, max_rotation_delta_deg 20
+
+K41144 GT:
+  raw     ADD 5.607 mm, translation 6.021 mm, ADD_0.1d 0.897
+  refined ADD 4.896 mm, translation 5.311 mm, ADD_0.1d 0.925
+
+bending_pipe GT:
+  raw     ADD 9.899 mm, translation 9.529 mm, ADD_0.1d 0.833
+  refined ADD 5.870 mm, translation 5.282 mm, ADD_0.1d 0.944
+```
+
+Phase 21-23 tooling:
+
+```text
+Phase 21:
+  scripts/sweep_pose_crop_export_params.py
+  smoke output: experiments/phase21_smoke_k41144_pred_crop_sweep.json
+
+Phase 22:
+  src/models/pointnet2_pose_refiner.py
+  src/training/pose_refiner_losses.py
+  scripts/train_pointnet2_pose_refiner.py
+  configs/train/pointnet2_pose_refiner_k41144.yaml
+  configs/train/pointnet2_pose_refiner_bending_pipe.yaml
+  evaluator flag: --translation-refiner-checkpoint
+  smoke output: experiments/pointnet2_pose_refiner_k41144_20260608_215456
+
+Phase 23:
+  scripts/run_pose_evaluation_suite.py
+  smoke output: experiments/phase23_smoke_pose_eval_suite/summary.json
+```
+
+Remaining validation work:
+
+- Raw keypoint-voting pose remains the primary learned output; refinement is optional and must be reported separately.
+- Strict refined translation is much better but still slightly above 5 mm on both GT test sets.
+- K41144 predicted-all translation worsens slightly after refinement even though ADD and ADD_0.1d improve.
+- Run full Phase 21 sweep and full Phase 23 suite without `--limit-samples` after training on larger datasets.
+- Keep learned translation refiner experimental until full-data suite proves it beats Phase 20 hybrid refinement on both objects.
 
 ## Useful Starting Commands
 

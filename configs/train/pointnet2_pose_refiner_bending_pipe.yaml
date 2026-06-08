@@ -1,0 +1,25 @@
+seed: 7
+
+pose:
+  config: configs/train/pointnet2_pose_voting_bending_pipe.yaml
+  checkpoint: experiments/pointnet2_pose_bending_pipe_20260608_021309/checkpoints/best_add.pt
+
+refiner:
+  input_dim: 41
+  hidden_dim: 128
+  depth: 3
+  dropout: 0.10
+
+loss:
+  translation_weight: 1.0
+  add_weight: 0.5
+  smooth_l1_beta: 0.01
+
+train:
+  seed: 7
+  device: cuda
+  num_workers: 0
+  epochs: 80
+  batch_size: 16
+  learning_rate: 0.001
+  weight_decay: 0.0001

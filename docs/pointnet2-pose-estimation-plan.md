@@ -2,7 +2,13 @@
 
 Date: 2026-06-07
 
-Status: Phase 11-14 implemented. Phase 14 full GT-crop evaluation exposed that the current PointNet++ pose MVP does not yet generalize well enough on held-out crops.
+Status: Phase 11-23 implemented. The raw PS6D-style keypoint/center voting model remains the primary learned pose output; optional hybrid ICP and learned translation-refiner paths are available and reported separately. The remaining work is full-data validation, not additional plan scaffolding.
+
+Detailed next implementation plan:
+
+```text
+docs/pose-estimation-completion-and-accuracy-plan.md
+```
 
 ## Goal
 
@@ -653,11 +659,21 @@ Interpretation:
 - Predicted K41144 pose quality is now limited significantly by instance crop quality.
 - bending_pipe predicted crops are cleaner, and the matched-crop pose result exceeds the ADD_0.1d target.
 
-### Phase 18: Refinement Candidate And Remaining Accuracy Gap
+### Phase 18-20: Audit, Center-Vote Ablation, And Optional Refinement
 
-Status: Designed; not enabled as default.
+Status: Implemented; refinement remains optional and is reported separately from raw pose.
 
-The learned pose is now stable enough for a refinement stage, but translation error remains above the strict `< 5 mm` target on both objects. The next refinement should be reported separately from raw network pose:
+The learned pose is stable enough for a refinement stage, but raw translation error remains above the strict `< 5 mm` target on both objects. Phase 18-20 added:
+
+```text
+scripts/analyze_pose_errors.py
+center-vote aggregation flags in scripts/eval_pointnet2_pose.py
+src/inference/pose_refinement.py
+configs/eval/pose_refinement_defaults.json
+raw-vs-refined evaluator JSON summaries
+```
+
+The refinement path is:
 
 ```text
 predicted object_to_camera -> ICP init
@@ -665,12 +681,35 @@ model points -> scene crop points
 refined object_to_camera
 ```
 
-Recommended implementation constraints:
+Verified Phase 20 recommended preset:
+
+```text
+method: hybrid
+distance_threshold_fraction: 0.16
+max_translation_delta_fraction: 0.20
+max_rotation_delta_deg: 20
+accept_if_improved: true
+```
+
+GT-crop test result with the preset:
+
+```text
+K41144:
+  raw     ADD 5.607 mm, translation 6.021 mm, ADD_0.1d 0.897
+  refined ADD 4.896 mm, translation 5.311 mm, ADD_0.1d 0.925
+
+bending_pipe:
+  raw     ADD 9.899 mm, translation 9.529 mm, ADD_0.1d 0.833
+  refined ADD 5.870 mm, translation 5.282 mm, ADD_0.1d 0.944
+```
+
+Operational constraints:
 
 - Keep raw keypoint-voting pose as the primary learned output.
 - Add ICP as an optional evaluator/inference flag, not as a silent replacement.
 - Report GT-crop raw, GT-crop refined, predicted-crop raw, and predicted-crop refined separately.
 - Use conservative distance thresholds because full-mesh-to-visible-crop ICP can pull the object origin toward visible partial surfaces.
+- Keep center-vote default as `mean`; robust aggregation did not improve both objects consistently.
 
 ## Risks
 
@@ -714,12 +753,17 @@ Mitigation:
 
 ## Immediate Next Task
 
-Start Phase 15 / next design iteration:
+Follow the completion and accuracy plan:
 
 ```text
-Implement a PS6D-style pose voting dataset/head:
-  per-point object-center or keypoint votes
-  symmetry-aware pose reconstruction
-  GT-crop training first
-Then re-run K41144 and bending_pipe full-split metrics.
+docs/pose-estimation-completion-and-accuracy-plan.md
+```
+
+Recommended next validation sequence:
+
+```text
+1. Run the full K41144 predicted-crop sweep.
+2. Train/evaluate on larger K41144 and bending_pipe datasets.
+3. Run the full pose evaluation suite without --limit-samples.
+4. Promote learned translation refinement only if it beats Phase 20 hybrid refinement across both objects.
 ```

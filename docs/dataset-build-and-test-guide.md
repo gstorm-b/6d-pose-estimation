@@ -2,7 +2,7 @@
 
 Date: 2026-06-08
 
-Status: current through pose Phase 18.
+Status: current through pose Phase 23.
 
 This guide is the operational runbook for rebuilding datasets and rerunning tests for the current single-class bin-picking pipeline.
 
@@ -15,6 +15,7 @@ raw Blender synthetic dataset
   -> pose crop export from GT or predicted instances
   -> PointNet++ PS6D-style keypoint/center voting pose checkpoint
   -> GT-crop and predicted-crop pose evaluation
+  -> optional raw-vs-refined pose evaluation
 ```
 
 ## Ground Rules
@@ -496,7 +497,7 @@ bending_pipe, all predicted crops:
   ADD_0.1d success 0.714
 ```
 
-## Phase 18 Acceptance Snapshot
+## Phase 18-20 Pose Audit, Ablation, And Refinement
 
 The current raw keypoint-voting pose model meets ADD_0.1d target on GT-crop test for both objects:
 
@@ -513,14 +514,183 @@ translation_error_mm is still above the strict 5 mm target:
   bending_pipe test: 9.529 mm
 ```
 
-Next phase should add optional refinement, likely ICP or a translation-specific refinement head. Report refined pose separately from raw keypoint-voting pose.
+Phase 20 adds optional hybrid ICP refinement and reports refined pose separately from raw keypoint-voting pose.
+
+Phase 18 audit commands:
+
+```powershell
+python .\scripts\analyze_pose_errors.py --config .\configs\train\pointnet2_pose_voting_k41144.yaml --checkpoint .\experiments\pointnet2_pose_k41144_20260608_023605\checkpoints\best_add.pt --data .\experiments\phase14_pose_crops_k41144_gt_test_xyznormal --out .\experiments\phase18_pose_error_audit_k41144_gt_test.json --export-worst-ply 5 --device cuda
+
+python .\scripts\analyze_pose_errors.py --config .\configs\train\pointnet2_pose_voting_bending_pipe.yaml --checkpoint .\experiments\pointnet2_pose_bending_pipe_20260608_021309\checkpoints\best_add.pt --data .\experiments\phase14_pose_crops_bending_pipe_gt_test_xyznormal --out .\experiments\phase18_pose_error_audit_bending_gt_test.json --export-worst-ply 5 --device cuda
+```
+
+Current audit finding:
+
+```text
+K41144 bucket counts:
+  large_translation_large_rotation: 22
+  large_translation_small_rotation: 25
+  small_translation_large_rotation: 12
+  ok_or_mild_error: 87
+
+bending_pipe bucket counts:
+  large_translation_large_rotation: 1
+  large_translation_small_rotation: 9
+  small_translation_large_rotation: 1
+  ok_or_mild_error: 7
+```
+
+Phase 19 center-vote aggregation flags:
+
+```powershell
+python .\scripts\eval_pointnet2_pose.py --config .\configs\train\pointnet2_pose_voting_k41144.yaml --checkpoint .\experiments\pointnet2_pose_k41144_20260608_023605\checkpoints\best_add.pt --data .\experiments\phase14_pose_crops_k41144_gt_test_xyznormal --out .\experiments\phase19_pose_ablation_k41144_gt_test_median.json --center-vote-aggregation median --device cuda
+
+python .\scripts\eval_pointnet2_pose.py --config .\configs\train\pointnet2_pose_voting_bending_pipe.yaml --checkpoint .\experiments\pointnet2_pose_bending_pipe_20260608_021309\checkpoints\best_add.pt --data .\experiments\phase14_pose_crops_bending_pipe_gt_test_xyznormal --out .\experiments\phase19_pose_ablation_bending_gt_test_geometric_median.json --center-vote-aggregation geometric_median --device cuda
+```
+
+Keep `mean` as the raw default. Robust aggregation improved translation only mildly and not consistently across ADD and both objects.
+
+Phase 20 recommended optional refinement preset:
+
+```text
+configs/eval/pose_refinement_defaults.json
+```
+
+GT-crop refined evaluation:
+
+```powershell
+python .\scripts\eval_pointnet2_pose.py --config .\configs\train\pointnet2_pose_voting_k41144.yaml --checkpoint .\experiments\pointnet2_pose_k41144_20260608_023605\checkpoints\best_add.pt --data .\experiments\phase14_pose_crops_k41144_gt_test_xyznormal --out .\experiments\phase20_refine_hybrid_wide16_t20_r20_k41144_gt.json --device cuda --refine-pose --refinement-method hybrid --refinement-distance-threshold-fraction 0.16 --refinement-max-translation-delta-fraction 0.20 --refinement-max-rotation-delta-deg 20
+
+python .\scripts\eval_pointnet2_pose.py --config .\configs\train\pointnet2_pose_voting_bending_pipe.yaml --checkpoint .\experiments\pointnet2_pose_bending_pipe_20260608_021309\checkpoints\best_add.pt --data .\experiments\phase14_pose_crops_bending_pipe_gt_test_xyznormal --out .\experiments\phase20_refine_hybrid_wide16_t20_r20_bending_gt.json --device cuda --refine-pose --refinement-method hybrid --refinement-distance-threshold-fraction 0.16 --refinement-max-translation-delta-fraction 0.20 --refinement-max-rotation-delta-deg 20
+```
+
+Current Phase 20 GT-crop refined reference:
+
+```text
+K41144:
+  raw     ADD 5.607 mm, translation 6.021 mm, ADD_0.1d 0.897
+  refined ADD 4.896 mm, translation 5.311 mm, ADD_0.1d 0.925
+  accepted 128/146, catastrophic ADD worse > 0.05d: 0
+
+bending_pipe:
+  raw     ADD 9.899 mm, translation 9.529 mm, ADD_0.1d 0.833
+  refined ADD 5.870 mm, translation 5.282 mm, ADD_0.1d 0.944
+  accepted 16/18, catastrophic ADD worse > 0.05d: 0
+```
+
+Current Phase 20 predicted-crop refined reference:
+
+```text
+K41144, matched_gt_iou >= 0.5:
+  raw     ADD 10.719 mm, translation 11.087 mm, ADD_0.1d 0.738
+  refined ADD 10.049 mm, translation 10.793 mm, ADD_0.1d 0.777
+
+K41144, all predicted:
+  raw     ADD 21.932 mm, translation 22.831 mm, ADD_0.1d 0.540
+  refined ADD 21.476 mm, translation 23.001 mm, ADD_0.1d 0.567
+
+bending_pipe, matched_gt_iou >= 0.5:
+  raw     ADD 12.146 mm, translation 13.470 mm, ADD_0.1d 0.923
+  refined ADD 10.928 mm, translation 12.038 mm, ADD_0.1d 0.923
+
+bending_pipe, all predicted:
+  raw     ADD 18.456 mm, translation 18.612 mm, ADD_0.1d 0.714
+  refined ADD 16.840 mm, translation 16.682 mm, ADD_0.1d 0.786
+```
+
+Known caveat:
+
+```text
+K41144 predicted-all translation worsens slightly after refinement even though ADD and ADD_0.1d improve.
+Do not treat refinement as a replacement for Phase 21 predicted-crop quality retuning.
+```
+
+## Phase 21 Predicted-Crop Sweep
+
+Run the full K41144 sweep:
+
+```powershell
+python .\scripts\sweep_pose_crop_export_params.py --instance-checkpoint .\experiments\pointnet2_instance_k41144_20260607_165729\checkpoints\best.pt --instance-data .\processed-data\pointnet2_semseg_k41144 --raw-root .\synthetic-data\K41144 --pose-config .\configs\train\pointnet2_pose_voting_k41144.yaml --pose-checkpoint .\experiments\pointnet2_pose_k41144_20260608_023605\checkpoints\best_add.pt --out .\experiments\phase21_k41144_pred_crop_sweep.json --device cuda --refine-pose
+```
+
+Smoke test:
+
+```powershell
+python .\scripts\sweep_pose_crop_export_params.py --instance-checkpoint .\experiments\pointnet2_instance_k41144_20260607_165729\checkpoints\best.pt --instance-data .\processed-data\pointnet2_semseg_k41144 --raw-root .\synthetic-data\K41144 --pose-config .\configs\train\pointnet2_pose_voting_k41144.yaml --pose-checkpoint .\experiments\pointnet2_pose_k41144_20260608_023605\checkpoints\best_add.pt --out .\experiments\phase21_smoke_k41144_pred_crop_sweep.json --object-probability-thresholds 0.50 --dbscan-eps-m 0.004 --min-cluster-points 96 --limit-samples 1 --device cuda --refine-pose
+```
+
+Smoke reference:
+
+```text
+prob_0p5_eps_0p004_min_96:
+  crops 28
+  matched IoU>=0.5 crops 17
+  all refined ADD_0.1d 0.464 on the one-sample smoke slice
+```
+
+## Phase 22 Learned Translation Refiner
+
+Train K41144 refiner:
+
+```powershell
+python .\scripts\train_pointnet2_pose_refiner.py --config .\configs\train\pointnet2_pose_refiner_k41144.yaml --data .\experiments\phase14_pose_crops_k41144_gt_train_xyznormal --val-data .\experiments\phase14_pose_crops_k41144_gt_val_xyznormal --device cuda
+```
+
+Train bending_pipe refiner:
+
+```powershell
+python .\scripts\train_pointnet2_pose_refiner.py --config .\configs\train\pointnet2_pose_refiner_bending_pipe.yaml --data .\experiments\phase14_pose_crops_bending_pipe_gt_train_xyznormal --val-data .\experiments\phase14_pose_crops_bending_pipe_gt_val_xyznormal --device cuda
+```
+
+Evaluate with a learned refiner checkpoint:
+
+```powershell
+python .\scripts\eval_pointnet2_pose.py --config .\configs\train\pointnet2_pose_voting_k41144.yaml --checkpoint .\experiments\pointnet2_pose_k41144_20260608_023605\checkpoints\best_add.pt --data .\experiments\phase14_pose_crops_k41144_gt_test_xyznormal --out .\experiments\k41144_gt_with_translation_refiner.json --translation-refiner-checkpoint .\experiments\<refiner_run>\checkpoints\best_add.pt --device cuda
+```
+
+Optional geometry after learned refiner:
+
+```powershell
+python .\scripts\eval_pointnet2_pose.py --config .\configs\train\pointnet2_pose_voting_k41144.yaml --checkpoint .\experiments\pointnet2_pose_k41144_20260608_023605\checkpoints\best_add.pt --data .\experiments\phase14_pose_crops_k41144_gt_test_xyznormal --out .\experiments\k41144_gt_with_translation_refiner_and_icp.json --translation-refiner-checkpoint .\experiments\<refiner_run>\checkpoints\best_add.pt --device cuda --refine-pose --refinement-method hybrid --refinement-distance-threshold-fraction 0.16 --refinement-max-translation-delta-fraction 0.20 --refinement-max-rotation-delta-deg 20
+```
+
+Smoke reference:
+
+```text
+experiments/pointnet2_pose_refiner_k41144_20260608_215456
+4-crop validation slice: raw ADD 6.964 mm -> refined ADD 6.743 mm at epoch 2
+```
+
+Keep learned refinement experimental until it beats Phase 20 hybrid refinement in the full Phase 23 suite.
+
+## Phase 23 Pose Evaluation Suite
+
+Run the full raw/refined suite:
+
+```powershell
+python .\scripts\run_pose_evaluation_suite.py --device cuda --refine-pose
+```
+
+Run a quick smoke suite:
+
+```powershell
+python .\scripts\run_pose_evaluation_suite.py --out-dir .\experiments\phase23_smoke_pose_eval_suite --device cuda --limit-samples 2 --refine-pose
+```
+
+Outputs:
+
+```text
+summary.json
+summary.md
+per-case evaluation JSON files
+```
 
 ## Quick Regression Checklist
 
 Run this after pose/data code changes:
 
 ```powershell
-python -m py_compile src\data\pose_crop_dataset.py src\models\pointnet2_pose.py src\models\pointnet2_pose_voting.py src\training\pose_losses.py src\training\pose_metrics.py scripts\train_pointnet2_pose.py scripts\eval_pointnet2_pose.py scripts\export_pose_instance_crops.py
+python -m py_compile src\data\pose_crop_dataset.py src\models\pointnet2_pose.py src\models\pointnet2_pose_voting.py src\models\pointnet2_pose_refiner.py src\training\pose_losses.py src\training\pose_metrics.py src\training\pose_refiner_losses.py src\inference\pose_refinement.py scripts\train_pointnet2_pose.py scripts\train_pointnet2_pose_refiner.py scripts\eval_pointnet2_pose.py scripts\export_pose_instance_crops.py scripts\analyze_pose_errors.py scripts\sweep_pose_crop_export_params.py scripts\run_pose_evaluation_suite.py
 
 python .\scripts\eval_pointnet2_pose.py --config .\configs\train\pointnet2_pose_voting_k41144.yaml --data .\experiments\phase14_pose_crops_k41144_gt_val_xyznormal --out .\experiments\smoke_pose_identity_k41144_val.json --identity-baseline --device cuda
 

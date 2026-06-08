@@ -13,9 +13,11 @@ from .pose_bridge import (
     pose_crop_summary,
     save_pose_instance_crops_npz,
 )
+from .pose_refinement import PoseRefinementConfig, refine_pose_batch
 
 __all__ = [
     "InstanceMetricConfig",
+    "PoseRefinementConfig",
     "PoseInstanceCrop",
     "VotedCenterClusteringConfig",
     "build_pose_instance_crops",
@@ -23,5 +25,6 @@ __all__ = [
     "evaluate_instance_predictions",
     "load_raw_metadata",
     "pose_crop_summary",
+    "refine_pose_batch",
     "save_pose_instance_crops_npz",
 ]

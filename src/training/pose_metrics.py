@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -15,11 +16,25 @@ from .pose_geometry import (
 )
 
 
-def pose_predictions_to_object_to_camera(outputs: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+@dataclass(frozen=True)
+class CenterVoteAggregationConfig:
+    method: str = "mean"
+    trim_fraction: float = 0.1
+    max_residual_fraction: float | None = None
+    geometric_median_iterations: int = 8
+    eps: float = 1e-8
+
+
+def pose_predictions_to_object_to_camera(
+    outputs: dict[str, torch.Tensor],
+    batch: dict[str, Any],
+    *,
+    center_vote_config: CenterVoteAggregationConfig | None = None,
+) -> dict[str, torch.Tensor]:
     """Convert model outputs into explicit `object_to_camera` components."""
 
     if "predicted_points_object_normalized" in outputs:
-        return voting_predictions_to_object_to_camera(outputs, batch)
+        return voting_predictions_to_object_to_camera(outputs, batch, center_vote_config=center_vote_config)
     rotation = rotation_6d_to_matrix(outputs["rotation_6d"])
     offset_norm = outputs["object_origin_offset_from_crop_centroid_camera_normalized"]
     diameter = batch["model_diameter_m"].to(device=offset_norm.device, dtype=offset_norm.dtype).view(-1, 1)
@@ -32,9 +47,15 @@ def pose_predictions_to_object_to_camera(outputs: dict[str, torch.Tensor], batch
     }
 
 
-def voting_predictions_to_object_to_camera(outputs: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+def voting_predictions_to_object_to_camera(
+    outputs: dict[str, torch.Tensor],
+    batch: dict[str, Any],
+    *,
+    center_vote_config: CenterVoteAggregationConfig | None = None,
+) -> dict[str, torch.Tensor]:
     """Estimate `object_to_camera` from dense object-coordinate votes."""
 
+    center_vote_config = center_vote_config or CenterVoteAggregationConfig()
     pred_object_normalized = outputs["predicted_points_object_normalized"]
     diameter = batch["model_diameter_m"].to(device=pred_object_normalized.device, dtype=pred_object_normalized.dtype).view(-1, 1, 1)
     object_points = pred_object_normalized * diameter
@@ -56,7 +77,7 @@ def voting_predictions_to_object_to_camera(outputs: dict[str, torch.Tensor], bat
             device=camera_points.device,
             dtype=camera_points.dtype,
         ) * diameter
-        origin = origin_votes.mean(dim=1)
+        origin = aggregate_center_votes(origin_votes, diameter.view(-1), center_vote_config)
     centroid = batch["crop_centroid_camera"].to(device=origin.device, dtype=origin.dtype)
     offset = origin - centroid
     offset_norm = offset / diameter.view(-1, 1).clamp_min(1e-8)
@@ -66,6 +87,63 @@ def voting_predictions_to_object_to_camera(outputs: dict[str, torch.Tensor], bat
         "object_origin_offset_from_crop_centroid_camera_normalized": offset_norm,
         "rotation_6d": matrix_to_rotation_6d(rotation),
     }
+
+
+def aggregate_center_votes(
+    origin_votes: torch.Tensor,
+    diameter: torch.Tensor,
+    config: CenterVoteAggregationConfig | None = None,
+) -> torch.Tensor:
+    """Aggregate per-point object-origin votes into one origin per crop."""
+
+    config = config or CenterVoteAggregationConfig()
+    method = config.method.lower()
+    if origin_votes.ndim != 3 or origin_votes.shape[-1] != 3:
+        raise ValueError(f"expected origin votes with shape (B, N, 3), got {tuple(origin_votes.shape)}")
+    if method == "mean":
+        return origin_votes.mean(dim=1)
+    median = origin_votes.median(dim=1).values
+    if method == "median":
+        return median
+    if method == "geometric_median":
+        return geometric_median(origin_votes, median, iterations=config.geometric_median_iterations, eps=config.eps)
+    if method not in {"trimmed_mean", "weighted_trimmed_mean"}:
+        raise ValueError(f"Unknown center-vote aggregation method: {config.method}")
+
+    distances = torch.linalg.norm(origin_votes - median.unsqueeze(1), dim=-1)
+    keep_count = max(1, int(round(origin_votes.shape[1] * (1.0 - float(config.trim_fraction)))))
+    keep_count = min(keep_count, origin_votes.shape[1])
+    nearest = torch.topk(distances, k=keep_count, dim=1, largest=False).indices
+    keep_mask = torch.zeros_like(distances, dtype=torch.bool)
+    keep_mask.scatter_(1, nearest, True)
+    if config.max_residual_fraction is not None and config.max_residual_fraction > 0:
+        max_residual = diameter.to(device=origin_votes.device, dtype=origin_votes.dtype).view(-1, 1) * float(config.max_residual_fraction)
+        keep_mask = keep_mask & (distances <= max_residual)
+    fallback_mask = keep_mask.any(dim=1, keepdim=True)
+    keep_mask = torch.where(fallback_mask, keep_mask, torch.ones_like(keep_mask, dtype=torch.bool))
+    if method == "weighted_trimmed_mean":
+        weights = torch.where(keep_mask, 1.0 / distances.clamp_min(config.eps), torch.zeros_like(distances))
+    else:
+        weights = keep_mask.to(dtype=origin_votes.dtype)
+    weights = weights / weights.sum(dim=1, keepdim=True).clamp_min(config.eps)
+    return (origin_votes * weights.unsqueeze(-1)).sum(dim=1)
+
+
+def geometric_median(
+    points: torch.Tensor,
+    initial: torch.Tensor,
+    *,
+    iterations: int = 8,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Batched Weiszfeld geometric median for small vote clouds."""
+
+    current = initial
+    for _ in range(max(1, int(iterations))):
+        distances = torch.linalg.norm(points - current.unsqueeze(1), dim=-1).clamp_min(eps)
+        weights = 1.0 / distances
+        current = (points * weights.unsqueeze(-1)).sum(dim=1) / weights.sum(dim=1, keepdim=True).clamp_min(eps)
+    return current
 
 
 def weighted_kabsch_object_to_camera(
@@ -90,16 +168,37 @@ def weighted_kabsch_object_to_camera(
         correction = torch.ones((rotation.shape[0], 3), dtype=rotation.dtype, device=rotation.device)
         correction[:, -1] = torch.where(det < 0, -1.0, 1.0)
         rotation = vh.transpose(-1, -2) @ torch.diag_embed(correction) @ u.transpose(-1, -2)
-    origin = camera_mean - object_mean @ rotation.transpose(-1, -2)
+    transformed_object_mean = (object_mean.unsqueeze(1) @ rotation.transpose(-1, -2)).squeeze(1)
+    origin = camera_mean - transformed_object_mean
     return rotation, origin
 
 
-def compute_pose_metrics(outputs: dict[str, torch.Tensor], batch: dict[str, Any]) -> dict[str, float]:
-    """Compute batch-mean pose metrics."""
+def compute_pose_metrics_per_sample(
+    outputs: dict[str, torch.Tensor],
+    batch: dict[str, Any],
+    *,
+    center_vote_config: CenterVoteAggregationConfig | None = None,
+) -> dict[str, torch.Tensor]:
+    """Compute per-crop pose metrics as tensors."""
 
-    pred = pose_predictions_to_object_to_camera(outputs, batch)
-    rotation_pred = pred["rotation_object_to_camera"]
-    origin_pred = pred["object_origin_camera"]
+    pred = pose_predictions_to_object_to_camera(outputs, batch, center_vote_config=center_vote_config)
+    return compute_pose_metrics_per_sample_from_pose(
+        rotation_pred_object_to_camera=pred["rotation_object_to_camera"],
+        origin_pred_camera=pred["object_origin_camera"],
+        batch=batch,
+    )
+
+
+def compute_pose_metrics_per_sample_from_pose(
+    *,
+    rotation_pred_object_to_camera: torch.Tensor,
+    origin_pred_camera: torch.Tensor,
+    batch: dict[str, Any],
+) -> dict[str, torch.Tensor]:
+    """Compute per-crop pose metrics for explicit pose tensors."""
+
+    rotation_pred = rotation_pred_object_to_camera
+    origin_pred = origin_pred_camera
     rotation_gt = batch["rotation_object_to_camera"].to(device=rotation_pred.device, dtype=rotation_pred.dtype)
     origin_gt = batch["object_origin_camera"].to(device=origin_pred.device, dtype=origin_pred.dtype)
     model_points = batch["model_points_object"].to(device=rotation_pred.device, dtype=rotation_pred.dtype)
@@ -125,27 +224,44 @@ def compute_pose_metrics(outputs: dict[str, torch.Tensor], batch: dict[str, Any]
     diameter = batch["model_diameter_m"].to(device=add.device, dtype=add.dtype).view(-1)
     success_01d = add <= (0.1 * diameter)
     success_005d = add <= (0.05 * diameter)
+    matched_iou = batch["matched_gt_iou"].to(device=add.device, dtype=add.dtype).view(-1)
     return {
-        "translation_error_m": float(translation_error.mean().detach().cpu()),
-        "translation_error_mm": float((translation_error * 1000.0).mean().detach().cpu()),
-        "rotation_error_deg_symmetry_aware": float(rotation_error.mean().detach().cpu()),
-        "add_m": float(add.mean().detach().cpu()),
-        "add_mm": float((add * 1000.0).mean().detach().cpu()),
-        "pose_success_add_0.1d": float(success_01d.float().mean().detach().cpu()),
-        "pose_success_add_0.05d": float(success_005d.float().mean().detach().cpu()),
-        "matched_crop_iou": float(batch["matched_gt_iou"].float().mean().detach().cpu()),
+        "translation_error_m": translation_error,
+        "translation_error_mm": translation_error * 1000.0,
+        "rotation_error_deg_symmetry_aware": rotation_error,
+        "add_m": add,
+        "add_mm": add * 1000.0,
+        "pose_success_add_0.1d": success_01d.float(),
+        "pose_success_add_0.05d": success_005d.float(),
+        "matched_crop_iou": matched_iou,
+    }
+
+
+def compute_pose_metrics(
+    outputs: dict[str, torch.Tensor],
+    batch: dict[str, Any],
+    *,
+    center_vote_config: CenterVoteAggregationConfig | None = None,
+) -> dict[str, float]:
+    """Compute batch-mean pose metrics."""
+
+    metrics = compute_pose_metrics_per_sample(outputs, batch, center_vote_config=center_vote_config)
+    return {
+        key: float(value.mean().detach().cpu())
+        for key, value in metrics.items()
     }
 
 
 class PoseMetricMeter:
     """Accumulate pose metrics over batches."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, center_vote_config: CenterVoteAggregationConfig | None = None) -> None:
+        self.center_vote_config = center_vote_config
         self.totals: dict[str, float] = {}
         self.weight = 0
 
     def update(self, outputs: dict[str, torch.Tensor], batch: dict[str, Any]) -> None:
-        metrics = compute_pose_metrics(outputs, batch)
+        metrics = compute_pose_metrics(outputs, batch, center_vote_config=self.center_vote_config)
         first_output = next(iter(outputs.values()))
         batch_size = int(first_output.shape[0])
         self.weight += batch_size

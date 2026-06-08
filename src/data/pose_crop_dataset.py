@@ -98,6 +98,7 @@ class PoseCropDataset(Dataset):  # type: ignore[misc]
         with np.load(record["crop_file"]) as data:
             crop_offsets = np.asarray(data["crop_offsets"], dtype=np.int64)
             start, end = crop_offsets[record["crop_index"]]
+            crop_point_count = int(end - start)
             points_depth_camera = np.asarray(data["crop_points_camera"][start:end], dtype=np.float32)
             points_camera = positive_forward_depth_to_metadata_camera(points_depth_camera)
             crop_features = None
@@ -198,6 +199,7 @@ class PoseCropDataset(Dataset):  # type: ignore[misc]
             "model_points_object": torch.from_numpy(self.geometry.model_points_object.astype(np.float32)),
             "symmetry_matrices_object": torch.from_numpy(self.geometry.symmetry_matrices_object.astype(np.float32)),
             "matched_gt_iou": torch.tensor(matched_gt_iou, dtype=torch.float32),
+            "crop_point_count": torch.tensor(crop_point_count, dtype=torch.int64),
             "matched_gt_instance_id": torch.tensor(matched_gt_instance_id, dtype=torch.int64),
             "instance_id": torch.tensor(instance_id, dtype=torch.int64),
             "crop_index": torch.tensor(record["crop_index"], dtype=torch.int64),

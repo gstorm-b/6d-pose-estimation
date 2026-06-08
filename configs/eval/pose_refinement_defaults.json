@@ -1,0 +1,33 @@
+{
+  "status": "phase20_verified_optional_refinement",
+  "center_vote_aggregation": {
+    "method": "mean",
+    "trim_fraction": 0.1,
+    "max_residual_fraction": null,
+    "geometric_median_iterations": 8,
+    "notes": "Mean remains the raw-pose default because robust aggregation did not improve both objects consistently."
+  },
+  "refinement": {
+    "enabled": true,
+    "method": "hybrid",
+    "max_iterations": 10,
+    "distance_threshold_fraction": 0.16,
+    "max_translation_delta_fraction": 0.2,
+    "max_rotation_delta_deg": 20.0,
+    "accept_if_improved": true,
+    "notes": "Use only for separate refined-pose reporting. Raw keypoint-voting metrics must remain the primary non-refined baseline."
+  },
+  "verified_outputs": {
+    "k41144_gt": "experiments/phase20_refine_hybrid_wide16_t20_r20_k41144_gt.json",
+    "bending_pipe_gt": "experiments/phase20_refine_hybrid_wide16_t20_r20_bending_gt.json",
+    "k41144_pred_iou05": "experiments/phase20_refine_hybrid_wide16_t20_r20_k41144_pred_iou05.json",
+    "k41144_pred_all": "experiments/phase20_refine_hybrid_wide16_t20_r20_k41144_pred_all.json",
+    "bending_pipe_pred_iou05": "experiments/phase20_refine_hybrid_wide16_t20_r20_bending_pred_iou05.json",
+    "bending_pipe_pred_all": "experiments/phase20_refine_hybrid_wide16_t20_r20_bending_pred_all.json"
+  },
+  "known_risks": [
+    "K41144 predicted-all translation worsened slightly even though ADD and ADD_0.1d improved.",
+    "K41144 predicted-crop evaluation had one catastrophic ADD-worse crop at the 0.05d threshold.",
+    "This refinement is not a replacement for improving predicted crop quality."
+  ]
+}
