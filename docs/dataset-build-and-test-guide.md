@@ -68,7 +68,8 @@ In the Generation group:
 - Select `object-model/K41144.stl` or `object-model/bending_pipe.stl`.
 - Set class name to `K41144` or `bending_pipe`.
 - Set model scale to `1.0` for K41144 or `0.001` for bending_pipe.
-- Set depth camera, RGB camera, light, spawn, restitution, and settle-frame parameters.
+- Set depth camera, RGB camera, debug video camera, light, spawn, restitution, and settle-frame parameters.
+- Use `1 Sample + Video` to generate a single accepted sample with `spawn_simulation.mp4`. This mode forces video frame step 1 so object falling and settling are easier to inspect before running a full dataset.
 - Use Import Preset / Export Preset for repeatable generator settings.
 - Choose a new empty output folder.
 
@@ -93,6 +94,12 @@ Run Blender:
 ```powershell
 & "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --model .\object-model\K41144.stl --class-name K41144 --model-scale 1.0 --output .\synthetic-data\K41144_new --samples 80 --objects 30 --width 640 --height 480 --bin-wall-height 0.14 --drop-height-min 0.12 --drop-height-max 0.34 --spawn-strategy layered --objects-per-layer 6 --spawn-min-distance 0.045 --spawn-settle-frames 35 --collision-margin 0.00002 --object-restitution 0.01 --min-visible-objects 12 --min-visible-points 8000 --max-sample-attempts 12 --settle-frames 260
 ```
+
+Generation notes:
+
+- `--spawn-settle-frames > 0` uses delayed rigid-body activation. Every object is prepared at frame 1, hidden and disabled until its scheduled spawn frame, then activated while earlier objects remain active.
+- Simulation preview videos use the debug camera parameters: `--debug-camera-location`, `--debug-camera-target`, and `--debug-camera-lens`.
+- For parameter tuning, add `--samples 1 --record-simulation-video --simulation-video-frame-step 1` and inspect `sample_000000/spawn_simulation.mp4`. The preview uses a bright temporary material and hides bin walls only during video render, after raw RGB/depth/mask/metadata have already been written.
 
 Raw sample folders should contain:
 

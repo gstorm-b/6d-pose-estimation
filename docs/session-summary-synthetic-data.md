@@ -101,9 +101,10 @@ Purpose:
 - Create a bin/container.
 - Spawn many copies of the object.
 - Run Blender rigid-body simulation.
-- When `--spawn-settle-frames > 0`, spawn incrementally by creating one active rigid body, advancing the simulation, then creating the next active body. Previously spawned objects remain active; they are not converted to passive colliders.
+- When `--spawn-settle-frames > 0`, use delayed rigid-body activation: all objects are prepared at frame 1, each object's rigid body stays disabled/hidden until its scheduled `spawn_frame`, then becomes active. Previously spawned objects remain active; they are not converted to passive colliders.
 - Use an object-aware spawn edge margin and a best-candidate fallback when the requested per-layer spawn distance cannot be fully satisfied inside the bin.
 - Render RGB visual reference from the RGB camera.
+- Optionally render `spawn_simulation.mp4` from a dedicated debug camera so generator parameters can be tuned by watching objects fall and settle.
 - Raycast from the depth camera to export depth, masks, normals, point cloud and labels.
 - Store depth-camera and RGB-camera intrinsics/extrinsics separately while keeping legacy `camera_intrinsics`, `camera_to_world`, `world_to_camera`, and `object_to_camera` aliases for the depth camera.
 - Export object pose ground truth.
@@ -123,6 +124,7 @@ Important generator options:
 - `--model-scale`: scale applied to STL vertices before simulation. Use `0.001` for millimeter-authored STL files such as `bending_pipe.stl`.
 - `--depth-camera-location`, `--depth-camera-target`, `--depth-camera-lens`: camera used for depth, masks, normals, point cloud, and pose labels.
 - `--rgb-camera-location`, `--rgb-camera-target`, `--rgb-camera-lens`: camera used for `rgb.png`.
+- `--debug-camera-location`, `--debug-camera-target`, `--debug-camera-lens`: camera used for simulation preview videos. It does not affect depth, masks, RGB, point cloud labels, or pose metadata.
 - `--light-location`, `--light-energy`, `--light-size`: area-light controls.
 - `--settings-file`: load a JSON generator preset before applying explicit CLI overrides.
 - `--export-settings`: write the effective generator settings to a JSON preset.
@@ -130,7 +132,7 @@ Important generator options:
 - `--objects`: number of object copies to spawn before filtering.
 - `--spawn-strategy layered`: spreads initial objects into height bands to avoid explosive overlaps.
 - `--objects-per-layer`: number of objects per initial height band.
-- `--spawn-settle-frames`: default `35`. If greater than zero, enable one active rigid body at a time after this many settle frames before enabling the next object. Earlier objects remain active, so the pile can keep adjusting while later objects fall. Use `0` only when intentionally reverting to the old batch-spawn behavior for comparison.
+- `--spawn-settle-frames`: default `35`. If greater than zero, each object receives a scheduled `spawn_frame` separated by this many frames. Objects are hidden and rigid-body-disabled before their spawn frame, then become active; earlier objects remain active, so the pile can keep adjusting while later objects fall. Use `0` only when intentionally reverting to batch-active behavior for comparison.
 - `--drop-height-min`, `--drop-height-max`: random spawn height range.
 - `--collision-margin`: rigid-body margin in meters. Current recommended value is `0.00002`, or 0.02 mm.
 - `--object-restitution`: rigid-body bounce/restitution for spawned objects. Lower values reduce rebounds.
@@ -139,6 +141,7 @@ Important generator options:
 - `--min-visible-objects`: reject samples with fewer visible instances.
 - `--min-visible-points`: reject samples with too few object points.
 - `--max-sample-attempts`: retries before failing a sample.
+- `--record-simulation-video`: render `spawn_simulation.mp4` for accepted samples using the debug camera. For tuning, prefer `--samples 1 --simulation-video-frame-step 1` so fast falling motion is not skipped. The preview temporarily uses a bright object material and hides bin walls during video render only; raw RGB, depth, masks, point clouds, and metadata are written before that preview-only override.
 
 ### Raw Dataset Validator
 
@@ -225,7 +228,8 @@ scripts/dataset_gui.py
 Purpose:
 
 - Run the Blender generator from a local desktop UI.
-- Expose generator `--class-name`, `--model-scale`, depth-camera pose, RGB-camera pose, light controls, spawn settle frames, and object restitution in the Generation group so non-K41144 models and different sensor/physics setups can be generated without editing the script.
+- Expose generator `--class-name`, `--model-scale`, depth-camera pose, RGB-camera pose, debug-camera pose for simulation videos, light controls, spawn settle frames, object restitution, and simulation-video controls in the Generation group so non-K41144 models and different sensor/physics setups can be generated without editing the script.
+- Provide a `1 Sample + Video` action that forces one accepted sample, enables simulation video recording, and uses video frame step 1 for parameter tuning.
 - Import/export generator presets as JSON from the Generation group. Preset keys match the generator CLI setting names, so the same file can be reused with `--settings-file`.
 - Stream Blender generation logs while the process runs.
 - Open any raw dataset folder and list `sample_xxxxxx` samples.

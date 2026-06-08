@@ -35,7 +35,119 @@ class GenerationScene:
     template: bpy.types.Object
     depth_camera: bpy.types.Object
     rgb_camera: bpy.types.Object
+    debug_camera: bpy.types.Object
     class_name: str
+
+
+@dataclass
+class SimulationVideoRecorder:
+    enabled: bool
+    frame_step: int = 4
+    objects: list[bpy.types.Object] | None = None
+    spawn_frames: dict[str, int] | None = None
+    samples: dict[str, dict[int, tuple[tuple[float, float, float], tuple[float, float, float], bool]]] | None = None
+    last_recorded_frame: int = -1
+
+    def __post_init__(self) -> None:
+        if self.objects is None:
+            self.objects = []
+        if self.spawn_frames is None:
+            self.spawn_frames = {}
+        if self.samples is None:
+            self.samples = {}
+        self.frame_step = max(1, int(self.frame_step))
+
+    def register_object(self, obj: bpy.types.Object, *, spawn_frame: int | None = None) -> None:
+        if not self.enabled:
+            return
+        assert self.objects is not None
+        assert self.spawn_frames is not None
+        assert self.samples is not None
+        self.objects.append(obj)
+        self.spawn_frames[obj.name] = int(spawn_frame if spawn_frame is not None else bpy.context.scene.frame_current)
+        self.samples.setdefault(obj.name, {})
+        self.record_current(force=True)
+
+    def record_current(self, *, force: bool = False) -> None:
+        if not self.enabled:
+            return
+        frame = int(bpy.context.scene.frame_current)
+        bpy.context.view_layer.update()
+        assert self.objects is not None
+        assert self.samples is not None
+        for obj in self.objects:
+            if obj.name not in bpy.data.objects:
+                continue
+            matrix_world = obj.matrix_world.copy()
+            location = matrix_world.to_translation()
+            rotation = matrix_world.to_euler()
+            self.samples.setdefault(obj.name, {})[frame] = (
+                tuple(float(v) for v in location),
+                tuple(float(v) for v in rotation),
+                bool(obj.hide_viewport or obj.hide_render),
+            )
+        self.last_recorded_frame = frame
+
+    def apply_animation_keyframes(self, *, frame_start: int, frame_end: int) -> int:
+        if not self.enabled:
+            return 0
+        assert self.objects is not None
+        assert self.spawn_frames is not None
+        assert self.samples is not None
+        inserted = 0
+        for obj in self.objects:
+            if obj.name not in bpy.data.objects:
+                continue
+            obj.animation_data_clear()
+            spawn_frame = max(int(frame_start), int(self.spawn_frames.get(obj.name, frame_start)))
+            obj_samples = self.samples.get(obj.name, {})
+            if spawn_frame > frame_start:
+                obj.hide_viewport = True
+                obj.hide_render = True
+                obj.keyframe_insert(data_path="hide_viewport", frame=frame_start)
+                obj.keyframe_insert(data_path="hide_render", frame=frame_start)
+                obj.keyframe_insert(data_path="hide_viewport", frame=spawn_frame - 1)
+                obj.keyframe_insert(data_path="hide_render", frame=spawn_frame - 1)
+                inserted += 2
+            for frame in sorted(f for f in obj_samples if spawn_frame <= f <= frame_end):
+                location, rotation, hidden = obj_samples[frame]
+                obj.location = location
+                obj.rotation_euler = rotation
+                obj.hide_viewport = hidden
+                obj.hide_render = hidden
+                obj.keyframe_insert(data_path="location", frame=frame)
+                obj.keyframe_insert(data_path="rotation_euler", frame=frame)
+                obj.keyframe_insert(data_path="hide_viewport", frame=frame)
+                obj.keyframe_insert(data_path="hide_render", frame=frame)
+                inserted += 1
+            if obj.animation_data and obj.animation_data.action:
+                set_animation_interpolation(obj.animation_data.action)
+        return inserted
+
+    def summary(self, *, frame_start: int, frame_end: int) -> dict[str, Any]:
+        if not self.enabled:
+            return {"objects": 0, "visible_samples": 0, "z_min": None, "z_max": None}
+        assert self.samples is not None
+        visible_samples = 0
+        z_values: list[float] = []
+        for obj_samples in self.samples.values():
+            for frame, (location, _rotation, hidden) in obj_samples.items():
+                if frame_start <= frame <= frame_end and not hidden:
+                    visible_samples += 1
+                    z_values.append(float(location[2]))
+        return {
+            "objects": len(self.samples),
+            "visible_samples": visible_samples,
+            "z_min": min(z_values) if z_values else None,
+            "z_max": max(z_values) if z_values else None,
+        }
+
+
+def set_animation_interpolation(action: bpy.types.Action) -> None:
+    for fcurve in action.fcurves:
+        interpolation = "CONSTANT" if fcurve.data_path in {"hide_viewport", "hide_render", "rigid_body.enabled", "rigid_body.kinematic"} else "LINEAR"
+        for keyframe in fcurve.keyframe_points:
+            keyframe.interpolation = interpolation
 
 
 def synthetic_log(message: str) -> None:
@@ -60,6 +172,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--rgb-camera-location", type=float, nargs=3, default=(0.0, -0.05, 0.42))
     parser.add_argument("--rgb-camera-target", type=float, nargs=3, default=(0.0, 0.0, 0.025))
     parser.add_argument("--rgb-camera-lens", type=float, default=35.0)
+    parser.add_argument("--debug-camera-location", type=float, nargs=3, default=(0.45, -0.55, 0.45))
+    parser.add_argument("--debug-camera-target", type=float, nargs=3, default=(0.0, 0.0, 0.06))
+    parser.add_argument("--debug-camera-lens", type=float, default=22.0)
     parser.add_argument("--light-location", type=float, nargs=3, default=(0.0, -0.22, 0.45))
     parser.add_argument("--light-energy", type=float, default=90.0)
     parser.add_argument("--light-size", type=float, default=0.45)
@@ -96,6 +211,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-visible-points", type=int, default=2000)
     parser.add_argument("--max-sample-attempts", type=int, default=8)
     parser.add_argument("--settle-frames", type=int, default=220)
+    parser.add_argument("--record-simulation-video", action="store_true", help="Render an MP4 preview of the accepted sample's object drop/settle animation.")
+    parser.add_argument("--simulation-video-name", default="spawn_simulation.mp4")
+    parser.add_argument("--simulation-video-frame-step", type=int, default=4, help="Render every Nth simulation frame in the preview video.")
+    parser.add_argument("--simulation-video-fps", type=int, default=24)
+    parser.add_argument("--simulation-video-resolution-percent", type=int, default=70)
     return parser
 
 
@@ -346,6 +466,28 @@ def sample_spawn_xy(
     return best_candidate
 
 
+def set_rigid_body_enabled_keyframe(obj: bpy.types.Object, *, frame: int, enabled: bool) -> None:
+    obj.hide_viewport = not enabled
+    obj.hide_render = not enabled
+    obj.keyframe_insert(data_path="hide_viewport", frame=frame)
+    obj.keyframe_insert(data_path="hide_render", frame=frame)
+    if obj.rigid_body is not None:
+        obj.rigid_body.enabled = enabled
+        obj.rigid_body.kinematic = not enabled
+        obj.rigid_body.keyframe_insert(data_path="enabled", frame=frame)
+        obj.rigid_body.keyframe_insert(data_path="kinematic", frame=frame)
+
+
+def configure_delayed_rigid_body_activation(obj: bpy.types.Object, spawn_frame: int) -> None:
+    spawn_frame = max(1, int(spawn_frame))
+    if spawn_frame > 1:
+        set_rigid_body_enabled_keyframe(obj, frame=1, enabled=False)
+        set_rigid_body_enabled_keyframe(obj, frame=spawn_frame - 1, enabled=False)
+    set_rigid_body_enabled_keyframe(obj, frame=spawn_frame, enabled=True)
+    if obj.animation_data and obj.animation_data.action:
+        set_animation_interpolation(obj.animation_data.action)
+
+
 def create_object_instances(
     template: bpy.types.Object,
     class_name: str,
@@ -363,6 +505,7 @@ def create_object_instances(
     collision_margin: float,
     collision_shape: str,
     object_restitution: float,
+    recorder: SimulationVideoRecorder | None = None,
 ) -> list[bpy.types.Object]:
     safe_name = sanitize_blender_name(class_name)
     mat = make_material(f"mat_{safe_name}_black_metal", (0.015, 0.014, 0.013, 1.0), metallic=0.85, roughness=0.85)
@@ -372,12 +515,14 @@ def create_object_instances(
     objects = []
     spawn_xy_by_layer: dict[int, list[tuple[float, float]]] = {}
     margin = object_spawn_edge_margin(template, bin_x, bin_y, collision_margin)
+    bpy.context.scene.frame_set(1)
     for idx in range(count):
         obj = template.copy()
         obj.data = template.data
         obj.name = f"{safe_name}_{idx + 1:03d}"
-        obj.hide_viewport = False
-        obj.hide_render = False
+        spawn_frame = 1 + idx * max(0, int(spawn_settle_frames))
+        obj.hide_viewport = spawn_frame > 1
+        obj.hide_render = spawn_frame > 1
         z, layer = sample_drop_height(
             idx,
             count,
@@ -396,6 +541,8 @@ def create_object_instances(
         obj["spawn_height"] = z
         obj["spawn_edge_margin"] = margin
         obj.rotation_euler = random_rotation()
+        obj.hide_viewport = False
+        obj.hide_render = False
         bpy.context.collection.objects.link(obj)
         bpy.context.view_layer.update()
         bpy.ops.object.select_all(action="DESELECT")
@@ -411,15 +558,16 @@ def create_object_instances(
         obj.rigid_body.angular_damping = 0.45
         obj.rigid_body.collision_shape = collision_shape
         configure_rigid_body_margin(obj, collision_margin)
-        obj["spawn_frame"] = int(bpy.context.scene.frame_current)
+        configure_delayed_rigid_body_activation(obj, spawn_frame)
+        obj["spawn_frame"] = int(spawn_frame)
         objects.append(obj)
+        if recorder is not None:
+            recorder.register_object(obj, spawn_frame=spawn_frame)
         if idx == 0 or (idx + 1) % 5 == 0 or idx + 1 == count:
             synthetic_log(
-                f"[synthetic] spawned object {idx + 1}/{count} "
-                f"at frame {bpy.context.scene.frame_current}"
+                f"[synthetic] scheduled object {idx + 1}/{count} "
+                f"spawn_frame={spawn_frame}"
             )
-        if spawn_settle_frames > 0 and idx < count - 1:
-            advance_scene_frames(spawn_settle_frames)
 
     template.hide_viewport = True
     template.hide_render = True
@@ -498,24 +646,30 @@ def reset_physics_cache(frames: int) -> None:
         pass
 
 
-def settle_scene(frames: int) -> None:
+def settle_scene(frames: int, recorder: SimulationVideoRecorder | None = None) -> None:
     scene = bpy.context.scene
     scene.frame_set(1)
+    if recorder is not None:
+        recorder.record_current(force=True)
     for frame in range(1, frames + 1):
         scene.frame_set(frame)
+        if recorder is not None:
+            recorder.record_current()
 
 
-def advance_scene_frames(frames: int) -> None:
+def advance_scene_frames(frames: int, recorder: SimulationVideoRecorder | None = None) -> None:
     scene = bpy.context.scene
     start = scene.frame_current
     for frame in range(start + 1, start + frames + 1):
         scene.frame_set(frame)
+        if recorder is not None:
+            recorder.record_current()
 
 
 def simulation_frame_count(args: argparse.Namespace) -> int:
     if args.spawn_settle_frames <= 0:
         return args.settle_frames
-    return args.settle_frames + max(0, args.objects - 1) * args.spawn_settle_frames
+    return 1 + args.settle_frames + max(0, args.objects - 1) * args.spawn_settle_frames
 
 
 def keep_objects_inside_bin(
@@ -722,17 +876,152 @@ def render_rgb(path: Path, camera: bpy.types.Object) -> None:
     bpy.ops.render.render(write_still=True)
 
 
+def remove_rigid_bodies_for_animation(objects: list[bpy.types.Object]) -> None:
+    for obj in objects:
+        if obj.name not in bpy.data.objects or obj.rigid_body is None:
+            continue
+        bpy.ops.object.select_all(action="DESELECT")
+        bpy.context.view_layer.objects.active = obj
+        obj.select_set(True)
+        try:
+            bpy.ops.rigidbody.object_remove()
+        except RuntimeError:
+            pass
+        obj.select_set(False)
+
+
+def render_simulation_video(
+    path: Path,
+    camera: bpy.types.Object,
+    objects: list[bpy.types.Object],
+    *,
+    recorder: SimulationVideoRecorder | None,
+    frame_end: int,
+    frame_step: int,
+    fps: int,
+    resolution_percent: int,
+) -> None:
+    if not objects:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scene = bpy.context.scene
+    render = scene.render
+    old_settings = {
+        "camera": scene.camera,
+        "engine": scene.render.engine,
+        "filepath": render.filepath,
+        "frame_start": scene.frame_start,
+        "frame_end": scene.frame_end,
+        "frame_step": scene.frame_step,
+        "fps": render.fps,
+        "resolution_x": render.resolution_x,
+        "resolution_y": render.resolution_y,
+        "resolution_percentage": render.resolution_percentage,
+        "file_format": render.image_settings.file_format,
+        "ffmpeg_format": render.ffmpeg.format,
+        "ffmpeg_codec": render.ffmpeg.codec,
+        "ffmpeg_constant_rate_factor": render.ffmpeg.constant_rate_factor,
+    }
+    old_object_colors = {obj.name: tuple(obj.color) for obj in objects if obj.name in bpy.data.objects}
+    old_materials_by_data: dict[str, list[bpy.types.Material]] = {}
+    preview_hidden_objects = [obj for obj in bpy.data.objects if obj.name.startswith("bin_wall_")]
+    old_preview_visibility = {
+        obj.name: (bool(obj.hide_viewport), bool(obj.hide_render))
+        for obj in preview_hidden_objects
+    }
+    shading = getattr(scene.display, "shading", None)
+    old_shading = {
+        "light": getattr(shading, "light", None) if shading is not None else None,
+        "color_type": getattr(shading, "color_type", None) if shading is not None else None,
+    }
+    remove_rigid_bodies_for_animation(objects)
+    keyframes = recorder.apply_animation_keyframes(frame_start=1, frame_end=frame_end) if recorder is not None else 0
+    recorder_summary = recorder.summary(frame_start=1, frame_end=frame_end) if recorder is not None else {}
+    for obj in preview_hidden_objects:
+        obj.hide_viewport = True
+        obj.hide_render = True
+    for idx, obj in enumerate(objects):
+        if obj.name in bpy.data.objects:
+            obj.color = (0.95, 0.62 + 0.12 * (idx % 2), 0.18, 1.0)
+            data_name = obj.data.name
+            if data_name not in old_materials_by_data:
+                old_materials_by_data[data_name] = [mat for mat in obj.data.materials]
+            preview_mat = make_material("mat_simulation_video_orange", (0.95, 0.62, 0.16, 1.0), roughness=0.5)
+            obj.data.materials.clear()
+            obj.data.materials.append(preview_mat)
+    scene.camera = camera
+    scene.frame_start = 1
+    scene.frame_end = max(1, int(frame_end))
+    scene.frame_step = max(1, int(frame_step))
+    render.fps = max(1, int(fps))
+    resolution_scale = max(5, min(100, int(resolution_percent))) / 100.0
+    render.resolution_x = max(2, int(round(render.resolution_x * resolution_scale)) // 2 * 2)
+    render.resolution_y = max(2, int(round(render.resolution_y * resolution_scale)) // 2 * 2)
+    render.resolution_percentage = 100
+    render.filepath = str(path)
+    render.image_settings.file_format = "FFMPEG"
+    render.ffmpeg.format = "MPEG4"
+    render.ffmpeg.codec = "H264"
+    render.ffmpeg.constant_rate_factor = "MEDIUM"
+    try:
+        scene.render.engine = "BLENDER_WORKBENCH"
+        if shading is not None:
+            shading.light = "STUDIO"
+            shading.color_type = "OBJECT"
+    except TypeError:
+        pass
+    synthetic_log(
+        f"[synthetic] rendering simulation video: {path} "
+        f"frames=1..{scene.frame_end} step={scene.frame_step} fps={render.fps} "
+        f"sampled_keyframes={keyframes} recorder={recorder_summary}"
+    )
+    try:
+        bpy.ops.render.render(animation=True)
+    finally:
+        scene.camera = old_settings["camera"]
+        scene.render.engine = old_settings["engine"]
+        render.filepath = old_settings["filepath"]
+        scene.frame_start = old_settings["frame_start"]
+        scene.frame_end = old_settings["frame_end"]
+        scene.frame_step = old_settings["frame_step"]
+        render.fps = old_settings["fps"]
+        render.resolution_x = old_settings["resolution_x"]
+        render.resolution_y = old_settings["resolution_y"]
+        render.resolution_percentage = old_settings["resolution_percentage"]
+        render.image_settings.file_format = old_settings["file_format"]
+        render.ffmpeg.format = old_settings["ffmpeg_format"]
+        render.ffmpeg.codec = old_settings["ffmpeg_codec"]
+        render.ffmpeg.constant_rate_factor = old_settings["ffmpeg_constant_rate_factor"]
+        for obj in preview_hidden_objects:
+            if obj.name in bpy.data.objects and obj.name in old_preview_visibility:
+                obj.hide_viewport, obj.hide_render = old_preview_visibility[obj.name]
+        for obj in objects:
+            if obj.name in bpy.data.objects and obj.name in old_object_colors:
+                obj.color = old_object_colors[obj.name]
+            if obj.name in bpy.data.objects and obj.data.name in old_materials_by_data:
+                obj.data.materials.clear()
+                for mat in old_materials_by_data[obj.data.name]:
+                    obj.data.materials.append(mat)
+        if shading is not None:
+            if old_shading["light"] is not None:
+                shading.light = old_shading["light"]
+            if old_shading["color_type"] is not None:
+                shading.color_type = old_shading["color_type"]
+
+
 def write_sample_outputs(
     sample_dir: Path,
     model_path: Path,
     class_name: str,
     depth_camera: bpy.types.Object,
     rgb_camera: bpy.types.Object,
+    debug_camera: bpy.types.Object,
     objects: list[bpy.types.Object],
     width: int,
     height: int,
     settings: dict[str, Any],
     sensor: dict[str, np.ndarray | dict[str, float]] | None = None,
+    simulation_video_file: str | None = None,
 ) -> None:
     sample_dir.mkdir(parents=True, exist_ok=True)
     render_rgb(sample_dir / "rgb.png", rgb_camera)
@@ -795,6 +1084,9 @@ def write_sample_outputs(
         "rgb_camera_intrinsics": camera_intrinsics(rgb_camera, width, height),
         "rgb_camera_to_world": matrix_to_list(rgb_camera.matrix_world),
         "rgb_world_to_camera": matrix_to_list(rgb_camera.matrix_world.inverted()),
+        "debug_camera_intrinsics": camera_intrinsics(debug_camera, width, height),
+        "debug_camera_to_world": matrix_to_list(debug_camera.matrix_world),
+        "debug_world_to_camera": matrix_to_list(debug_camera.matrix_world.inverted()),
         "settings": settings,
         "object_count": len(objects),
         "visible_object_point_count": int(np.asarray(sensor["point_instance_ids"]).shape[0]),
@@ -811,6 +1103,8 @@ def write_sample_outputs(
             "label_overlay_png": "label_overlay.png",
         },
     }
+    if simulation_video_file:
+        metadata["files"]["simulation_video"] = simulation_video_file
     depth_world_to_camera = depth_camera.matrix_world.inverted()
     rgb_world_to_camera = rgb_camera.matrix_world.inverted()
     for idx, obj in enumerate(objects):
@@ -873,9 +1167,23 @@ def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> Genera
         tuple(args.rgb_camera_target),
         args.rgb_camera_lens,
     )
+    debug_camera = setup_camera(
+        "debug_camera",
+        args.width,
+        args.height,
+        tuple(args.debug_camera_location),
+        tuple(args.debug_camera_target),
+        args.debug_camera_lens,
+    )
     bpy.context.scene.camera = rgb_camera
     setup_lighting(tuple(args.light_location), args.light_energy, args.light_size)
-    return GenerationScene(template=template, depth_camera=depth_camera, rgb_camera=rgb_camera, class_name=args.class_name)
+    return GenerationScene(
+        template=template,
+        depth_camera=depth_camera,
+        rgb_camera=rgb_camera,
+        debug_camera=debug_camera,
+        class_name=args.class_name,
+    )
 
 
 def build_sample(
@@ -890,6 +1198,10 @@ def build_sample(
     random.seed(seed)
     np.random.seed(seed)
     total_frames = simulation_frame_count(args)
+    recorder = SimulationVideoRecorder(
+        enabled=bool(args.record_simulation_video),
+        frame_step=int(args.simulation_video_frame_step),
+    )
     synthetic_log(
         f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
         f"objects={args.objects}, simulation_frames={total_frames}"
@@ -912,17 +1224,18 @@ def build_sample(
         args.collision_margin,
         args.collision_shape,
         args.object_restitution,
+        recorder=recorder,
     )
     all_objects = objects
     try:
-        if args.spawn_settle_frames > 0:
-            synthetic_log(
-                f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
-                f"final settling {args.settle_frames} frames from frame {bpy.context.scene.frame_current}"
-            )
-            advance_scene_frames(args.settle_frames)
-        else:
-            settle_scene(args.settle_frames)
+        recorder.record_current(force=True)
+        synthetic_log(
+            f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
+            f"running delayed-activation physics frames 1..{total_frames}"
+        )
+        advance_scene_frames(max(0, total_frames - int(bpy.context.scene.frame_current)), recorder=recorder)
+        bpy.context.scene.frame_set(total_frames)
+        recorder.record_current(force=True)
         out_of_bin_objects = find_out_of_bin_objects(objects, args.bin_x, args.bin_y, args.out_of_bin_tolerance)
         stats: dict[str, int | str | list[int]] = {
             "spawned_objects": len(objects),
@@ -955,6 +1268,7 @@ def build_sample(
             "drop_height_min": args.drop_height_min,
             "drop_height_max": args.drop_height_max,
             "spawn_strategy": args.spawn_strategy,
+            "spawn_mode": "delayed_rigid_body_activation" if args.spawn_settle_frames > 0 else "batch_active",
             "objects_per_layer": args.objects_per_layer,
             "spawn_min_distance": args.spawn_min_distance,
             "spawn_settle_frames": args.spawn_settle_frames,
@@ -968,6 +1282,9 @@ def build_sample(
             "rgb_camera_location": list(args.rgb_camera_location),
             "rgb_camera_target": list(args.rgb_camera_target),
             "rgb_camera_lens": args.rgb_camera_lens,
+            "debug_camera_location": list(args.debug_camera_location),
+            "debug_camera_target": list(args.debug_camera_target),
+            "debug_camera_lens": args.debug_camera_lens,
             "light_location": list(args.light_location),
             "light_energy": args.light_energy,
             "light_size": args.light_size,
@@ -979,20 +1296,40 @@ def build_sample(
             "min_visible_points": args.min_visible_points,
             "settle_frames": args.settle_frames,
             "simulation_frames": total_frames,
+            "record_simulation_video": args.record_simulation_video,
+            "simulation_video_name": args.simulation_video_name,
+            "simulation_video_frame_step": args.simulation_video_frame_step,
+            "simulation_video_fps": args.simulation_video_fps,
+            "simulation_video_resolution_percent": args.simulation_video_resolution_percent,
         }
         sample_dir = output_dir / f"sample_{sample_idx:06d}"
+        simulation_video_file = Path(args.simulation_video_name).name if args.record_simulation_video else None
         write_sample_outputs(
             sample_dir,
             model_path,
             scene_context.class_name,
             scene_context.depth_camera,
             scene_context.rgb_camera,
+            scene_context.debug_camera,
             objects,
             args.width,
             args.height,
             settings,
             sensor=sensor,
+            simulation_video_file=simulation_video_file,
         )
+        if args.record_simulation_video and simulation_video_file:
+            video_frame_end = max(total_frames, int(bpy.context.scene.frame_current), recorder.last_recorded_frame)
+            render_simulation_video(
+                sample_dir / simulation_video_file,
+                scene_context.debug_camera,
+                objects,
+                recorder=recorder,
+                frame_end=video_frame_end,
+                frame_step=args.simulation_video_frame_step,
+                fps=args.simulation_video_fps,
+                resolution_percent=args.simulation_video_resolution_percent,
+            )
         return True, stats
     finally:
         delete_objects(all_objects)
@@ -1058,6 +1395,7 @@ def main() -> None:
         "drop_height_min": args.drop_height_min,
         "drop_height_max": args.drop_height_max,
         "spawn_strategy": args.spawn_strategy,
+        "spawn_mode": "delayed_rigid_body_activation" if args.spawn_settle_frames > 0 else "batch_active",
         "objects_per_layer": args.objects_per_layer,
         "spawn_min_distance": args.spawn_min_distance,
         "spawn_settle_frames": args.spawn_settle_frames,
@@ -1071,6 +1409,9 @@ def main() -> None:
         "rgb_camera_location": list(args.rgb_camera_location),
         "rgb_camera_target": list(args.rgb_camera_target),
         "rgb_camera_lens": args.rgb_camera_lens,
+        "debug_camera_location": list(args.debug_camera_location),
+        "debug_camera_target": list(args.debug_camera_target),
+        "debug_camera_lens": args.debug_camera_lens,
         "light_location": list(args.light_location),
         "light_energy": args.light_energy,
         "light_size": args.light_size,
@@ -1083,6 +1424,11 @@ def main() -> None:
         "max_sample_attempts": args.max_sample_attempts,
         "settle_frames": args.settle_frames,
         "simulation_frames": total_frames,
+        "record_simulation_video": args.record_simulation_video,
+        "simulation_video_name": args.simulation_video_name,
+        "simulation_video_frame_step": args.simulation_video_frame_step,
+        "simulation_video_fps": args.simulation_video_fps,
+        "simulation_video_resolution_percent": args.simulation_video_resolution_percent,
         "accepted_samples": accepted,
         "rejected_attempts": rejected,
         "rejection_stats": rejection_stats[:25],

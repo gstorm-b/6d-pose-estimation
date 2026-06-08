@@ -87,7 +87,8 @@ Trong group Generation:
 - Set model scale:
   - K41144: `1.0`
   - bending_pipe: `0.001`
-- Chỉnh camera depth, camera RGB, đèn, spawn, restitution, settle frame.
+- Chỉnh camera depth, camera RGB, debug camera cho video, đèn, spawn, restitution, settle frame.
+- Dùng nút `1 Sample + Video` để tạo đúng một sample kèm `spawn_simulation.mp4`. Chế độ này tự ép video frame step về `1` để dễ quan sát object rơi và settle trước khi generate dataset lớn.
 - Dùng Import Preset / Export Preset để lưu cấu hình generator.
 - Chọn output folder mới, ví dụ:
 
@@ -117,6 +118,12 @@ Ví dụ:
 ```powershell
 & "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --model .\object-model\K41144.stl --class-name K41144 --model-scale 1.0 --output .\synthetic-data\K41144_new --samples 80 --objects 30 --width 640 --height 480 --bin-wall-height 0.14 --drop-height-min 0.12 --drop-height-max 0.34 --spawn-strategy layered --objects-per-layer 6 --spawn-min-distance 0.045 --spawn-settle-frames 35 --collision-margin 0.00002 --object-restitution 0.01 --min-visible-objects 12 --min-visible-points 8000 --max-sample-attempts 12 --settle-frames 260
 ```
+
+Ghi chú generate:
+
+- Khi `--spawn-settle-frames > 0`, generator dùng delayed rigid-body activation. Tất cả object được chuẩn bị ở frame 1, nhưng object chưa tới lượt sẽ bị hidden và disabled rigid body; tới `spawn_frame` thì mới active. Object đã rơi trước đó vẫn active, không bị chuyển sang passive.
+- Video debug dùng camera riêng qua `--debug-camera-location`, `--debug-camera-target`, `--debug-camera-lens`; camera này không ảnh hưởng depth/RGB/mask/pose label của dataset.
+- Khi tune parameter, nên chạy `--samples 1 --record-simulation-video --simulation-video-frame-step 1` rồi xem `sample_000000/spawn_simulation.mp4`. Video preview dùng material sáng tạm thời và ẩn tường box chỉ trong lúc render video, sau khi RGB/depth/mask/metadata raw đã được ghi xong.
 
 Mỗi sample raw hợp lệ cần có:
 

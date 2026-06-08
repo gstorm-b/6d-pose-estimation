@@ -493,6 +493,10 @@ class DatasetGui(QMainWindow):
         self.rgb_camera_location_row, self.rgb_camera_location_spins = self._xyz_spins((0.0, -0.05, 0.42))
         self.rgb_camera_target_row, self.rgb_camera_target_spins = self._xyz_spins((0.0, 0.0, 0.025))
         self.rgb_camera_lens_spin = self._double_spin(1.0, 300.0, 35.0, 2, 1.0)
+        self.debug_camera_location_row, self.debug_camera_location_spins = self._xyz_spins((0.45, -0.55, 0.45))
+        self.debug_camera_target_row, self.debug_camera_target_spins = self._xyz_spins((0.0, 0.0, 0.06))
+        self.debug_camera_lens_spin = self._double_spin(1.0, 300.0, 22.0, 2, 1.0)
+        self.debug_camera_lens_spin.setToolTip("Camera used only for simulation preview videos.")
         self.light_location_row, self.light_location_spins = self._xyz_spins((0.0, -0.22, 0.45))
         self.light_energy_spin = self._double_spin(0.0, 100000.0, 90.0, 2, 10.0)
         self.light_size_spin = self._double_spin(0.001, 10.0, 0.45, 3, 0.01)
@@ -512,6 +516,12 @@ class DatasetGui(QMainWindow):
         self.min_visible_points_spin = self._spin(0, 10000000, 8000)
         self.max_sample_attempts_spin = self._spin(1, 1000, 12)
         self.settle_frames_spin = self._spin(1, 5000, 260)
+        self.record_video_check = QCheckBox("Record simulation video")
+        self.record_video_check.setChecked(False)
+        self.record_video_check.setToolTip("Write an MP4 preview of the accepted sample's drop/settle animation.")
+        self.video_frame_step_spin = self._spin(1, 240, 4)
+        self.video_frame_step_spin.setToolTip("Render every Nth simulation frame to keep preview videos fast.")
+        self.video_fps_spin = self._spin(1, 120, 24)
 
         self.spawn_strategy_combo = QComboBox()
         self.spawn_strategy_combo.addItems(["layered", "random"])
@@ -534,6 +544,9 @@ class DatasetGui(QMainWindow):
         form.addRow("RGB cam XYZ", self.rgb_camera_location_row)
         form.addRow("RGB target XYZ", self.rgb_camera_target_row)
         form.addRow("RGB lens", self.rgb_camera_lens_spin)
+        form.addRow("Debug cam XYZ", self.debug_camera_location_row)
+        form.addRow("Debug target XYZ", self.debug_camera_target_row)
+        form.addRow("Debug lens", self.debug_camera_lens_spin)
         form.addRow("Light XYZ", self.light_location_row)
         form.addRow("Light energy", self.light_energy_spin)
         form.addRow("Light size", self.light_size_spin)
@@ -553,6 +566,9 @@ class DatasetGui(QMainWindow):
         form.addRow("Min visible points", self.min_visible_points_spin)
         form.addRow("Max attempts", self.max_sample_attempts_spin)
         form.addRow("Settle frames", self.settle_frames_spin)
+        form.addRow("Video", self.record_video_check)
+        form.addRow("Video frame step", self.video_frame_step_spin)
+        form.addRow("Video FPS", self.video_fps_spin)
         form.addRow("Out-of-bin", self.allow_out_of_bin_filtering_check)
 
         preset_actions = QHBoxLayout()
@@ -566,11 +582,14 @@ class DatasetGui(QMainWindow):
 
         self.start_button = QPushButton("Start Generation")
         self.start_button.clicked.connect(self.start_generation)
+        self.single_sample_video_button = QPushButton("1 Sample + Video")
+        self.single_sample_video_button.clicked.connect(lambda: self.start_generation(single_sample_video=True))
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_generation)
         actions = QHBoxLayout()
         actions.addWidget(self.start_button)
+        actions.addWidget(self.single_sample_video_button)
         actions.addWidget(self.stop_button)
         form.addRow("", actions)
         layout.addWidget(generation_group)
@@ -834,6 +853,9 @@ class DatasetGui(QMainWindow):
             "rgb_camera_location": self._xyz_values(self.rgb_camera_location_spins),
             "rgb_camera_target": self._xyz_values(self.rgb_camera_target_spins),
             "rgb_camera_lens": self.rgb_camera_lens_spin.value(),
+            "debug_camera_location": self._xyz_values(self.debug_camera_location_spins),
+            "debug_camera_target": self._xyz_values(self.debug_camera_target_spins),
+            "debug_camera_lens": self.debug_camera_lens_spin.value(),
             "light_location": self._xyz_values(self.light_location_spins),
             "light_energy": self.light_energy_spin.value(),
             "light_size": self.light_size_spin.value(),
@@ -853,6 +875,9 @@ class DatasetGui(QMainWindow):
             "min_visible_points": self.min_visible_points_spin.value(),
             "max_sample_attempts": self.max_sample_attempts_spin.value(),
             "settle_frames": self.settle_frames_spin.value(),
+            "record_simulation_video": self.record_video_check.isChecked(),
+            "simulation_video_frame_step": self.video_frame_step_spin.value(),
+            "simulation_video_fps": self.video_fps_spin.value(),
             "allow_out_of_bin_filtering": self.allow_out_of_bin_filtering_check.isChecked(),
         }
 
@@ -873,11 +898,14 @@ class DatasetGui(QMainWindow):
             "min_visible_points": self.min_visible_points_spin,
             "max_sample_attempts": self.max_sample_attempts_spin,
             "settle_frames": self.settle_frames_spin,
+            "simulation_video_frame_step": self.video_frame_step_spin,
+            "simulation_video_fps": self.video_fps_spin,
         }
         double_spins = {
             "model_scale": self.model_scale_spin,
             "depth_camera_lens": self.depth_camera_lens_spin,
             "rgb_camera_lens": self.rgb_camera_lens_spin,
+            "debug_camera_lens": self.debug_camera_lens_spin,
             "light_energy": self.light_energy_spin,
             "light_size": self.light_size_spin,
             "bin_x": self.bin_x_spin,
@@ -894,6 +922,8 @@ class DatasetGui(QMainWindow):
             "depth_camera_target": self.depth_camera_target_spins,
             "rgb_camera_location": self.rgb_camera_location_spins,
             "rgb_camera_target": self.rgb_camera_target_spins,
+            "debug_camera_location": self.debug_camera_location_spins,
+            "debug_camera_target": self.debug_camera_target_spins,
             "light_location": self.light_location_spins,
         }
 
@@ -915,6 +945,8 @@ class DatasetGui(QMainWindow):
             self.collision_shape_combo.setCurrentText(str(settings["collision_shape"]))
         if "allow_out_of_bin_filtering" in settings:
             self.allow_out_of_bin_filtering_check.setChecked(bool(settings["allow_out_of_bin_filtering"]))
+        if "record_simulation_video" in settings:
+            self.record_video_check.setChecked(bool(settings["record_simulation_video"]))
 
     def import_generation_settings(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import generator preset", str(PROJECT_ROOT), "JSON files (*.json);;All files (*)")
@@ -1208,7 +1240,7 @@ class DatasetGui(QMainWindow):
                 self.validation_table.setItem(row, col, QTableWidgetItem(str(value)))
         self.validation_table.resizeColumnsToContents()
 
-    def start_generation(self) -> None:
+    def start_generation(self, single_sample_video: bool = False) -> None:
         blender_path = Path(self.blender_path_edit.text())
         output_path = Path(self.output_path_edit.text())
         if not blender_path.exists():
@@ -1232,9 +1264,16 @@ class DatasetGui(QMainWindow):
             )
             if answer != QMessageBox.StandardButton.Yes:
                 return
-        command_args = self.build_generator_args(output_path)
+        command_args = self.build_generator_args(
+            output_path,
+            override_samples=1 if single_sample_video else None,
+            force_record_video=single_sample_video,
+            override_video_frame_step=1 if single_sample_video else None,
+        )
         policy = "filter" if self.allow_out_of_bin_filtering_check.isChecked() else "strict reject"
         self.log_text.append(f"[gui] Out-of-bin policy: {policy}")
+        if single_sample_video:
+            self.log_text.append("[gui] Single-sample video mode: forcing --samples 1, --record-simulation-video, and video frame step 1.")
         self.log_text.append(
             "[gui] Simulation estimate: "
             f"{self.estimated_simulation_frames()} frames per attempt, "
@@ -1255,6 +1294,7 @@ class DatasetGui(QMainWindow):
         self.process.readyReadStandardOutput.connect(self.on_process_output)
         self.process.finished.connect(self.on_process_finished)
         self.start_button.setEnabled(False)
+        self.single_sample_video_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.process.start()
 
@@ -1262,9 +1302,16 @@ class DatasetGui(QMainWindow):
         spawn_settle_frames = self.spawn_settle_frames_spin.value()
         if spawn_settle_frames <= 0:
             return self.settle_frames_spin.value()
-        return self.settle_frames_spin.value() + max(0, self.objects_spin.value() - 1) * spawn_settle_frames
+        return 1 + self.settle_frames_spin.value() + max(0, self.objects_spin.value() - 1) * spawn_settle_frames
 
-    def build_generator_args(self, output_path: Path) -> list[str]:
+    def build_generator_args(
+        self,
+        output_path: Path,
+        *,
+        override_samples: int | None = None,
+        force_record_video: bool = False,
+        override_video_frame_step: int | None = None,
+    ) -> list[str]:
         args = [
             "--background",
             "--python",
@@ -1277,7 +1324,7 @@ class DatasetGui(QMainWindow):
             "--output",
             self._display_path(output_path),
             "--samples",
-            str(self.samples_spin.value()),
+            str(override_samples if override_samples is not None else self.samples_spin.value()),
             "--objects",
             str(self.objects_spin.value()),
             "--width",
@@ -1323,12 +1370,20 @@ class DatasetGui(QMainWindow):
         self._extend_xyz_arg(args, "--rgb-camera-location", self.rgb_camera_location_spins)
         self._extend_xyz_arg(args, "--rgb-camera-target", self.rgb_camera_target_spins)
         args.extend(["--rgb-camera-lens", str(self.rgb_camera_lens_spin.value())])
+        self._extend_xyz_arg(args, "--debug-camera-location", self.debug_camera_location_spins)
+        self._extend_xyz_arg(args, "--debug-camera-target", self.debug_camera_target_spins)
+        args.extend(["--debug-camera-lens", str(self.debug_camera_lens_spin.value())])
         self._extend_xyz_arg(args, "--light-location", self.light_location_spins)
         args.extend(["--light-energy", str(self.light_energy_spin.value())])
         args.extend(["--light-size", str(self.light_size_spin.value())])
         class_name = self.class_name_edit.text().strip()
         if class_name:
             args.extend(["--class-name", class_name])
+        if self.record_video_check.isChecked() or force_record_video:
+            args.append("--record-simulation-video")
+            video_frame_step = override_video_frame_step if override_video_frame_step is not None else self.video_frame_step_spin.value()
+            args.extend(["--simulation-video-frame-step", str(video_frame_step)])
+            args.extend(["--simulation-video-fps", str(self.video_fps_spin.value())])
         if self.allow_out_of_bin_filtering_check.isChecked():
             args.append("--allow-out-of-bin-filtering")
         return args
@@ -1345,6 +1400,7 @@ class DatasetGui(QMainWindow):
     def on_process_finished(self, exit_code: int, exit_status: QProcess.ExitStatus) -> None:
         self.log_text.append(f"\n[gui] Blender finished with exit_code={exit_code}, exit_status={exit_status.name}")
         self.start_button.setEnabled(True)
+        self.single_sample_video_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self.process = None
         output_path = Path(self.output_path_edit.text())
