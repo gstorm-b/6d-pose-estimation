@@ -92,12 +92,15 @@ Run Blender:
 Run Blender:
 
 ```powershell
-& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --model .\object-model\K41144.stl --class-name K41144 --model-scale 1.0 --output .\synthetic-data\K41144_new --samples 80 --objects 30 --width 640 --height 480 --bin-wall-height 0.14 --drop-height-min 0.12 --drop-height-max 0.34 --spawn-strategy layered --objects-per-layer 6 --spawn-min-distance 0.045 --spawn-settle-frames 35 --collision-margin 0.00002 --object-restitution 0.01 --min-visible-objects 12 --min-visible-points 8000 --max-sample-attempts 12 --settle-frames 260
+& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --model .\object-model\K41144.stl --class-name K41144 --model-scale 1.0 --output .\synthetic-data\K41144_new --samples 80 --objects 30 --width 640 --height 480 --bin-wall-height 0.14 --drop-height-min 0.12 --drop-height-max 0.34 --spawn-strategy layered --objects-per-layer 6 --spawn-min-distance 0.045 --spawn-settle-frames 35 --collision-margin 0.0005 --object-restitution 0.01 --min-visible-objects 12 --min-visible-points 8000 --max-sample-attempts 12 --settle-frames 260
 ```
 
 Generation notes:
 
-- `--spawn-settle-frames > 0` uses delayed rigid-body activation. Every object is prepared at frame 1, hidden and disabled until its scheduled spawn frame, then activated while earlier objects remain active.
+- `--spawn-settle-frames > 0` uses delayed rigid-body activation. Pending objects wait parked far outside the bin (disabled rigid bodies remain static colliders in Bullet) and are keyframe-teleported to their drop position 3 frames before activation, so a newly activated object can never interpenetrate an invisible pending neighbor.
+- When spawns coexist (batch mode `--spawn-settle-frames 0`, or spawn frames closer than 12 frames apart), drop positions enforce a hard 3D separation of `2 * bounding_radius + max(collision_margin, 0.0005)` and lift candidates upward instead of overlapping.
+- A physics explosion watchdog rejects an attempt early with `reason="physics_explosion"` when any activated object exceeds the speed limit (`--explosion-speed-limit`, automatic by default, `0` disables) or leaves the vertical sanity band.
+- Physics defaults since 2026-06-10: `collision_margin 0.0005`, `physics_substeps 60`, `object_linear_damping 0.05`, `object_angular_damping 0.15`. See `docs/generator-physics-and-production-readiness-review.md` for the verified root cause behind these values.
 - Simulation preview videos use the debug camera parameters: `--debug-camera-location`, `--debug-camera-target`, and `--debug-camera-lens`.
 - For parameter tuning, add `--samples 1 --record-simulation-video --simulation-video-frame-step 1` and inspect `sample_000000/spawn_simulation.mp4`. The preview uses a bright temporary material and hides bin walls only during video render, after raw RGB/depth/mask/metadata have already been written.
 
@@ -138,6 +141,7 @@ synthetic-data/bending_pipe: 30/30 OK
 If validation fails:
 
 - Check out-of-bin counts first.
+- Check `rejection_stats` in `dataset_summary.json` for `physics_explosion` entries; they include the object, frame, and measured speed. Frequent explosions usually mean the bin is too crowded for the object size or the collision margin was lowered again.
 - Increase `spawn_min_distance`, `spawn_settle_frames`, or `settle_frames`.
 - Reduce `object_restitution`.
 - Do not use `--allow-out-of-bin-filtering` for training datasets unless doing a legacy-data audit.

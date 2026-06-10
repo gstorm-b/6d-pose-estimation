@@ -14,6 +14,8 @@ docs/pointnet2-instance-segmentation-plan.md
 docs/pointnet2-pose-estimation-plan.md
 docs/dataset-build-and-test-guide.md
 docs/pose-estimation-completion-and-accuracy-plan.md
+docs/generator-physics-and-production-readiness-review.md
+docs/pose-backend-implementation-plan.md
 ```
 
 Then inspect the current user request, usually under:
@@ -184,7 +186,7 @@ GUI responsibilities:
 
 - Run the Blender generator via `QProcess`.
 - Expose model path, class name, model scale, depth-camera, RGB-camera, and light generation parameters.
-- Expose spawn settle frames, object restitution, and JSON generator preset import/export in the Generation group.
+- Expose spawn settle frames, object restitution, linear/angular damping, and JSON generator preset import/export in the Generation group.
 - Stream logs without blocking the UI.
 - Browse raw datasets and preview samples.
 - Load sample previews and point clouds in worker threads.
@@ -395,7 +397,7 @@ python .\scripts\view_ply_pyside_vtk.py .\experiments\pointnet2_semseg_k41144_20
 Run the Blender generator manually:
 
 ```powershell
-& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --samples 3 --objects 30 --width 320 --height 240 --bin-wall-height 0.14 --drop-height-min 0.12 --drop-height-max 0.34 --spawn-strategy layered --objects-per-layer 6 --spawn-min-distance 0.045 --collision-margin 0.00002 --min-visible-objects 12 --min-visible-points 8000 --max-sample-attempts 12 --settle-frames 260 --output synthetic-data/K41144_test_new
+& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --samples 3 --objects 30 --width 320 --height 240 --bin-wall-height 0.14 --drop-height-min 0.12 --drop-height-max 0.34 --spawn-strategy layered --objects-per-layer 6 --spawn-min-distance 0.045 --collision-margin 0.0005 --min-visible-objects 12 --min-visible-points 8000 --max-sample-attempts 12 --settle-frames 260 --output synthetic-data/K41144_test_new
 ```
 
 ## Handoff Checklist
