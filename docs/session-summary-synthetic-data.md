@@ -101,7 +101,10 @@ Purpose:
 - Create a bin/container.
 - Spawn many copies of the object.
 - Run Blender rigid-body simulation.
-- When `--spawn-settle-frames > 0`, use delayed rigid-body activation: all objects are prepared at frame 1, each object's rigid body stays disabled/hidden until its scheduled `spawn_frame`, then becomes active. Previously spawned objects remain active; they are not converted to passive colliders.
+- When `--spawn-settle-frames > 0`, use delayed rigid-body activation: each object's rigid body stays disabled/hidden until its scheduled `spawn_frame`, then becomes active. Previously spawned objects remain active; they are not converted to passive colliders.
+- Pending objects wait parked far outside the bin and are keyframe-teleported to their drop position 3 frames before activation. Disabled rigid bodies remain static colliders in Bullet, so parking prevents the ballistic ejections that happened when a newly activated object interpenetrated an invisible pending neighbor.
+- When spawns coexist (batch mode `--spawn-settle-frames 0`, or spawn frames closer than 12 frames), drop positions enforce a hard 3D separation of `2 * bounding_radius + max(collision_margin, 0.0005)` and lift candidates upward instead of silently accepting overlaps.
+- A physics explosion watchdog estimates per-object speed every frame and rejects the attempt early with `reason="physics_explosion"` when any activated object exceeds the speed limit or leaves the vertical sanity band.
 - Use an object-aware spawn edge margin and a best-candidate fallback when the requested per-layer spawn distance cannot be fully satisfied inside the bin.
 - Render RGB visual reference from the RGB camera.
 - Optionally render `spawn_simulation.mp4` from a dedicated debug camera so generator parameters can be tuned by watching objects fall and settle.
@@ -114,7 +117,7 @@ Purpose:
 Recommended generation command:
 
 ```powershell
-& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --samples 100 --objects 30 --width 320 --height 240 --bin-wall-height 0.14 --drop-height-min 0.12 --drop-height-max 0.34 --spawn-strategy layered --objects-per-layer 6 --spawn-min-distance 0.045 --collision-margin 0.00002 --min-visible-objects 12 --min-visible-points 8000 --max-sample-attempts 12 --settle-frames 260
+& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --samples 100 --objects 30 --width 320 --height 240 --bin-wall-height 0.14 --drop-height-min 0.12 --drop-height-max 0.34 --spawn-strategy layered --objects-per-layer 6 --spawn-min-distance 0.045 --collision-margin 0.0005 --min-visible-objects 12 --min-visible-points 8000 --max-sample-attempts 12 --settle-frames 260
 ```
 
 Important generator options:
@@ -134,8 +137,14 @@ Important generator options:
 - `--objects-per-layer`: number of objects per initial height band.
 - `--spawn-settle-frames`: default `35`. If greater than zero, each object receives a scheduled `spawn_frame` separated by this many frames. Objects are hidden and rigid-body-disabled before their spawn frame, then become active; earlier objects remain active, so the pile can keep adjusting while later objects fall. Use `0` only when intentionally reverting to batch-active behavior for comparison.
 - `--drop-height-min`, `--drop-height-max`: random spawn height range.
-- `--collision-margin`: rigid-body margin in meters. Current recommended value is `0.00002`, or 0.02 mm.
+- `--collision-margin`: rigid-body margin in meters. Current recommended value is `0.0005` (0.5 mm). The old `0.00002` value was below what Bullet handles robustly and contributed to deep-penetration impulses and wall tunneling.
 - `--object-restitution`: rigid-body bounce/restitution for spawned objects. Lower values reduce rebounds.
+- `--object-mass`: rigid-body mass in kg. Default `0.08`.
+- `--object-linear-damping`: default `0.05`. The old hard-coded `0.35` made free fall unrealistically slow.
+- `--object-angular-damping`: default `0.15` (old hard-coded value was `0.45`).
+- `--physics-substeps`: rigid-body world substeps per frame. Default `60` (old hard-coded value was `20`); higher values reduce penetration depth and tunneling.
+- `--physics-solver-iterations`: constraint solver iterations. Default `30`.
+- `--explosion-speed-limit`: watchdog speed limit in m/s. Omit for an automatic limit `max(4.0, 1.5 * sqrt(2 g h_max))`; `0` disables the watchdog.
 - `--out-of-bin-tolerance`: tolerance around bin x/y bounds for post-physics world-bbox checks.
 - `--allow-out-of-bin-filtering`: optional legacy/debug behavior that hides out-of-bin objects and accepts the remaining scene if visibility thresholds pass. Do not use it for training datasets. Default behavior is stricter: reject the whole attempt.
 - `--min-visible-objects`: reject samples with fewer visible instances.
@@ -378,6 +387,36 @@ Cause:
 Fix:
 
 - Set `collision_margin = 0.00002`.
+- Later correction (2026-06-10): `0.00002` was too small for stable Bullet contacts and contributed to deep-penetration impulses and wall tunneling. The recommended value is now `0.0005` (0.5 mm), which is still invisible at dataset resolution.
+
+### Objects Ejected At High Speed During Drop
+
+Symptom:
+
+- Some spawned objects suddenly moved at very high speed in a direction unrelated to gravity and left the bin area. Behavior was random across attempts. Falling objects could also rest in mid-air.
+
+Cause (verified by headless Blender probes, 2026-06-10):
+
+- Delayed-activation pending objects (`rigid_body.enabled=False`, hidden) remain in the Bullet world as invisible static colliders, and all objects were placed at their drop positions at frame 1.
+- Spawn spacing could not prevent overlap: `spawn_min_distance` was enforced only within one layer with a silent best-effort fallback, while two randomly rotated copies need up to `2 * bounding_radius` (K41144 `~0.096 m`, bending_pipe `~0.137 m`).
+- An object activating while interpenetrating a pending static collider is ejected by Bullet penetration recovery (probe measured `38 m/s`).
+- The tiny collision margin and 20 substeps amplified deep penetration and wall tunneling; `linear_damping 0.35` also made normal falls look slow.
+
+Fix (see `docs/generator-physics-and-production-readiness-review.md` for full details):
+
+- Park pending objects far outside the bin; teleport to the drop position 3 frames before activation with CONSTANT-interpolated location keyframes (zero handoff velocity).
+- Enforce hard 3D drop-position separation with upward lift fallback whenever spawns coexist.
+- New physics defaults: `collision_margin 0.0005`, `substeps 60`, `linear_damping 0.05`, `angular_damping 0.15`.
+- Physics explosion watchdog rejects attempts early with `reason="physics_explosion"` and full diagnostics.
+
+Validation outputs:
+
+```text
+synthetic-data/K41144_physics_fix_smoke_delayed: 2/2 OK, 0 rejected attempts, parked_spawns=9
+synthetic-data/K41144_physics_fix_smoke_batch:   2/2 OK, 0 rejected attempts, z-lift active
+```
+
+Known pre-existing log artifact: Blender prints `rigidbody_get_shape_convexhull_from_mesh: no vertices to define Convex Hull collision shape with` twice per sample. This appears with the old generator code as well, does not affect physics correctness (hidden disabled bodies still collide; samples validate OK), and is unrelated to this fix.
 
 ### Too Many Objects Left The Bin
 

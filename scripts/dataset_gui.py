@@ -507,9 +507,14 @@ class DatasetGui(QMainWindow):
         self.drop_height_max_spin = self._double_spin(0.001, 5.0, 0.34, 3, 0.01)
         self.objects_per_layer_spin = self._spin(1, 100, 6)
         self.spawn_min_distance_spin = self._double_spin(0.0, 1.0, 0.045, 3, 0.005)
-        self.collision_margin_spin = self._double_spin(0.0, 0.1, 0.00002, 6, 0.00001)
+        self.collision_margin_spin = self._double_spin(0.0, 0.1, 0.0005, 6, 0.0001)
+        self.collision_margin_spin.setToolTip("Rigid-body collision margin in meters. 0.5 mm keeps contacts stable without visible gaps.")
         self.object_restitution_spin = self._double_spin(0.0, 1.0, 0.05, 3, 0.01)
         self.object_restitution_spin.setToolTip("Rigid-body bounce/restitution for spawned objects. Lower values reduce rebounds.")
+        self.object_linear_damping_spin = self._double_spin(0.0, 1.0, 0.05, 3, 0.01)
+        self.object_linear_damping_spin.setToolTip("Rigid-body linear damping. High values make free fall unrealistically slow.")
+        self.object_angular_damping_spin = self._double_spin(0.0, 1.0, 0.15, 3, 0.01)
+        self.object_angular_damping_spin.setToolTip("Rigid-body angular damping for spawned objects.")
         self.spawn_settle_frames_spin = self._spin(0, 5000, 35)
         self.spawn_settle_frames_spin.setToolTip("If greater than 0, spawn one object, settle it for this many frames, then spawn the next object.")
         self.min_visible_objects_spin = self._spin(0, 200, 12)
@@ -562,6 +567,8 @@ class DatasetGui(QMainWindow):
         form.addRow("Collision margin", self.collision_margin_spin)
         form.addRow("Collision shape", self.collision_shape_combo)
         form.addRow("Object bounce", self.object_restitution_spin)
+        form.addRow("Linear damping", self.object_linear_damping_spin)
+        form.addRow("Angular damping", self.object_angular_damping_spin)
         form.addRow("Min visible objects", self.min_visible_objects_spin)
         form.addRow("Min visible points", self.min_visible_points_spin)
         form.addRow("Max attempts", self.max_sample_attempts_spin)
@@ -871,6 +878,8 @@ class DatasetGui(QMainWindow):
             "collision_margin": self.collision_margin_spin.value(),
             "collision_shape": self.collision_shape_combo.currentText(),
             "object_restitution": self.object_restitution_spin.value(),
+            "object_linear_damping": self.object_linear_damping_spin.value(),
+            "object_angular_damping": self.object_angular_damping_spin.value(),
             "min_visible_objects": self.min_visible_objects_spin.value(),
             "min_visible_points": self.min_visible_points_spin.value(),
             "max_sample_attempts": self.max_sample_attempts_spin.value(),
@@ -916,6 +925,8 @@ class DatasetGui(QMainWindow):
             "spawn_min_distance": self.spawn_min_distance_spin,
             "collision_margin": self.collision_margin_spin,
             "object_restitution": self.object_restitution_spin,
+            "object_linear_damping": self.object_linear_damping_spin,
+            "object_angular_damping": self.object_angular_damping_spin,
         }
         xyz_spins = {
             "depth_camera_location": self.depth_camera_location_spins,
@@ -1355,6 +1366,10 @@ class DatasetGui(QMainWindow):
             self.collision_shape_combo.currentText(),
             "--object-restitution",
             str(self.object_restitution_spin.value()),
+            "--object-linear-damping",
+            str(self.object_linear_damping_spin.value()),
+            "--object-angular-damping",
+            str(self.object_angular_damping_spin.value()),
             "--min-visible-objects",
             str(self.min_visible_objects_spin.value()),
             "--min-visible-points",

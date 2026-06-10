@@ -17,7 +17,7 @@ import math
 import random
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,17 @@ from mathutils import Matrix, Vector
 
 OBJECT_CLASS_ID = 1
 BACKGROUND_ID = 0
+
+# Pending rigid bodies stay in the Bullet world as static colliders, so they are
+# parked outside the bin and teleported to the drop position this many frames
+# before activation. The static frames zero the kinematic->dynamic handoff velocity.
+PARK_STATIC_LEAD_FRAMES = 3
+SPAWN_SEPARATION_XY_TRIES = 150
+SPAWN_SEPARATION_LIFT_TRIES = 25
+# Below this spawn spacing (~0.5 s at 24 fps) the previous object may still be
+# falling inside the drop band when the next one teleports in, so drop positions
+# must keep the hard 3D separation even for parked objects.
+SPAWN_FALL_CLEAR_FRAMES = 12
 
 
 @dataclass
@@ -143,11 +154,83 @@ class SimulationVideoRecorder:
         }
 
 
-def set_animation_interpolation(action: bpy.types.Action) -> None:
+def set_animation_interpolation(action: bpy.types.Action, *, location_interpolation: str = "LINEAR") -> None:
+    constant_paths = {"hide_viewport", "hide_render", "rigid_body.enabled", "rigid_body.kinematic"}
     for fcurve in action.fcurves:
-        interpolation = "CONSTANT" if fcurve.data_path in {"hide_viewport", "hide_render", "rigid_body.enabled", "rigid_body.kinematic"} else "LINEAR"
+        if fcurve.data_path in constant_paths:
+            interpolation = "CONSTANT"
+        elif fcurve.data_path == "location":
+            interpolation = location_interpolation
+        else:
+            interpolation = "LINEAR"
         for keyframe in fcurve.keyframe_points:
             keyframe.interpolation = interpolation
+
+
+@dataclass
+class ObjectPhysicsSettings:
+    """Rigid-body parameters applied to every spawned object copy."""
+
+    mass_kg: float
+    friction: float
+    restitution: float
+    linear_damping: float
+    angular_damping: float
+    collision_margin: float
+    collision_shape: str
+
+
+@dataclass
+class PhysicsExplosionWatchdog:
+    """Abort an attempt early when solver impulses eject an object at unphysical speed.
+
+    Speed is estimated from per-frame position deltas of activated objects only,
+    so parking teleports of still-pending objects are never measured.
+    """
+
+    enabled: bool
+    speed_limit_m_s: float
+    z_min_limit_m: float
+    z_max_limit_m: float
+    fps: float
+    objects: list[bpy.types.Object] = field(default_factory=list)
+    spawn_frames: dict[str, int] = field(default_factory=dict)
+    previous_locations: dict[str, Vector] = field(default_factory=dict)
+    violation: dict[str, Any] | None = None
+
+    def check_current_frame(self) -> dict[str, Any] | None:
+        if not self.enabled or self.violation is not None:
+            return self.violation
+        frame = int(bpy.context.scene.frame_current)
+        for obj in self.objects:
+            if obj.name not in bpy.data.objects:
+                continue
+            if frame < int(self.spawn_frames.get(obj.name, 1)):
+                continue
+            location = obj.matrix_world.translation.copy()
+            previous = self.previous_locations.get(obj.name)
+            self.previous_locations[obj.name] = location
+            if previous is None:
+                continue
+            speed = (location - previous).length * self.fps
+            if speed > self.speed_limit_m_s or location.z < self.z_min_limit_m or location.z > self.z_max_limit_m:
+                self.violation = {
+                    "object": obj.name,
+                    "frame": frame,
+                    "speed_m_s": round(float(speed), 3),
+                    "speed_limit_m_s": round(float(self.speed_limit_m_s), 3),
+                    "location_m": [round(float(v), 4) for v in location],
+                    "z_limits_m": [round(float(self.z_min_limit_m), 4), round(float(self.z_max_limit_m), 4)],
+                }
+                return self.violation
+        return None
+
+
+def auto_explosion_speed_limit(max_spawn_z_m: float) -> float:
+    """Speed limit from free-fall energy: no legitimate motion should exceed it."""
+
+    free_fall_speed = math.sqrt(2.0 * 9.81 * max(max_spawn_z_m, 0.05))
+    return max(4.0, 1.5 * free_fall_speed)
 
 
 def synthetic_log(message: str) -> None:
@@ -195,9 +278,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=35,
         help="If > 0, enable one active rigid body at a time after this many settle frames before enabling the next object.",
     )
-    parser.add_argument("--collision-margin", type=float, default=0.00002)
+    parser.add_argument(
+        "--collision-margin",
+        type=float,
+        default=0.0005,
+        help="Rigid-body collision margin in meters. 0.5 mm keeps Bullet contacts stable without visible gaps.",
+    )
     parser.add_argument("--collision-shape", choices=("CONVEX_HULL", "MESH"), default="CONVEX_HULL")
     parser.add_argument("--object-restitution", type=float, default=0.05, help="Rigid-body bounce/restitution for spawned objects.")
+    parser.add_argument("--object-mass", type=float, default=0.08, help="Rigid-body mass in kg for spawned objects.")
+    parser.add_argument(
+        "--object-linear-damping",
+        type=float,
+        default=0.05,
+        help="Rigid-body linear damping for spawned objects. High values make free fall unrealistically slow.",
+    )
+    parser.add_argument("--object-angular-damping", type=float, default=0.15, help="Rigid-body angular damping for spawned objects.")
+    parser.add_argument(
+        "--physics-substeps",
+        type=int,
+        default=60,
+        help="Rigid-body world substeps per frame. Higher values reduce penetration depth and tunneling.",
+    )
+    parser.add_argument("--physics-solver-iterations", type=int, default=30, help="Rigid-body constraint solver iterations per substep.")
+    parser.add_argument(
+        "--explosion-speed-limit",
+        type=float,
+        default=None,
+        help=(
+            "Reject the attempt when any activated object moves faster than this many m/s. "
+            "Omit for an automatic limit derived from drop height; 0 disables the watchdog."
+        ),
+    )
     parser.add_argument("--out-of-bin-tolerance", type=float, default=0.015)
     parser.add_argument(
         "--allow-out-of-bin-filtering",
@@ -429,12 +541,83 @@ def sample_drop_height(
     return random.uniform(min_h, max_h), 0
 
 
-def object_spawn_edge_margin(template: bpy.types.Object, bin_x: float, bin_y: float, collision_margin: float) -> float:
+def object_bounding_radius(template: bpy.types.Object) -> float:
+    """Worst-case distance from the recentered origin to any vertex, in meters."""
+
     if not template.data.vertices:
         return 0.035
-    radius = max(float(vertex.co.length) for vertex in template.data.vertices)
+    return max(float(vertex.co.length) for vertex in template.data.vertices)
+
+
+def object_spawn_edge_margin(template: bpy.types.Object, bin_x: float, bin_y: float, collision_margin: float) -> float:
+    radius = object_bounding_radius(template)
     desired = max(0.035, radius + collision_margin)
     return min(desired, min(bin_x, bin_y) * 0.45)
+
+
+def sample_separated_spawn_position(
+    bin_x: float,
+    bin_y: float,
+    margin: float,
+    z_base: float,
+    existing_positions: list[tuple[float, float, float]],
+    min_separation: float,
+) -> tuple[float, float, float, int]:
+    """Sample a drop position with a hard 3D separation against coexisting drops.
+
+    Coexisting drops happen in batch mode (spawn_settle_frames=0) and for objects
+    whose spawn frame is too early to park. Interpenetration at activation causes
+    ballistic solver ejections, so when the bin footprint cannot satisfy the
+    separation the candidate is lifted upward instead of accepting an overlap.
+    Returns (x, y, z, lift_steps).
+    """
+
+    x_min = -bin_x / 2.0 + margin
+    x_max = bin_x / 2.0 - margin
+    y_min = -bin_y / 2.0 + margin
+    y_max = bin_y / 2.0 - margin
+    if x_min > x_max or y_min > y_max:
+        return 0.0, 0.0, z_base, 0
+    if not existing_positions:
+        return random.uniform(x_min, x_max), random.uniform(y_min, y_max), z_base, 0
+
+    lift_step = max(0.5 * min_separation, 0.02)
+    for lift_idx in range(SPAWN_SEPARATION_LIFT_TRIES + 1):
+        z = z_base + lift_idx * lift_step
+        for _ in range(SPAWN_SEPARATION_XY_TRIES):
+            candidate = (random.uniform(x_min, x_max), random.uniform(y_min, y_max), z)
+            if all(math.dist(candidate, existing) >= min_separation for existing in existing_positions):
+                return candidate[0], candidate[1], z, lift_idx
+    # Guaranteed-clear fallback: rise above the highest existing drop position.
+    z = max(existing[2] for existing in existing_positions) + min_separation
+    return random.uniform(x_min, x_max), random.uniform(y_min, y_max), z, SPAWN_SEPARATION_LIFT_TRIES + 1
+
+
+def configure_parked_spawn_location(
+    obj: bpy.types.Object,
+    *,
+    spawn_frame: int,
+    park_location: tuple[float, float, float],
+    drop_location: tuple[float, float, float],
+) -> bool:
+    """Keep a pending object parked far outside the bin until shortly before activation.
+
+    Pending rigid bodies (enabled=False) remain in the Bullet world as static
+    colliders, so they must not wait inside the drop volume. The object is
+    teleported to its drop position PARK_STATIC_LEAD_FRAMES before activation and
+    held static there, which zeroes the kinematic->dynamic handoff velocity.
+    Location keyframes use CONSTANT interpolation so the parked body never glides
+    through the scene. Returns False when the spawn frame is too early to park.
+    """
+
+    teleport_frame = int(spawn_frame) - PARK_STATIC_LEAD_FRAMES
+    if teleport_frame < 2:
+        return False
+    obj.location = park_location
+    obj.keyframe_insert(data_path="location", frame=1)
+    obj.location = drop_location
+    obj.keyframe_insert(data_path="location", frame=teleport_frame)
+    return True
 
 
 def sample_spawn_xy(
@@ -485,7 +668,8 @@ def configure_delayed_rigid_body_activation(obj: bpy.types.Object, spawn_frame: 
         set_rigid_body_enabled_keyframe(obj, frame=spawn_frame - 1, enabled=False)
     set_rigid_body_enabled_keyframe(obj, frame=spawn_frame, enabled=True)
     if obj.animation_data and obj.animation_data.action:
-        set_animation_interpolation(obj.animation_data.action)
+        # Parking keyframes must hold their value, not glide between positions.
+        set_animation_interpolation(obj.animation_data.action, location_interpolation="CONSTANT")
 
 
 def create_object_instances(
@@ -502,9 +686,7 @@ def create_object_instances(
     objects_per_layer: int,
     spawn_min_distance: float,
     spawn_settle_frames: int,
-    collision_margin: float,
-    collision_shape: str,
-    object_restitution: float,
+    physics: ObjectPhysicsSettings,
     recorder: SimulationVideoRecorder | None = None,
 ) -> list[bpy.types.Object]:
     safe_name = sanitize_blender_name(class_name)
@@ -514,15 +696,23 @@ def create_object_instances(
 
     objects = []
     spawn_xy_by_layer: dict[int, list[tuple[float, float]]] = {}
-    margin = object_spawn_edge_margin(template, bin_x, bin_y, collision_margin)
+    coexisting_drop_positions: list[tuple[float, float, float]] = []
+    margin = object_spawn_edge_margin(template, bin_x, bin_y, physics.collision_margin)
+    radius = object_bounding_radius(template)
+    # Two randomly rotated copies can touch up to 2 * bounding radius apart.
+    min_separation = 2.0 * radius + max(physics.collision_margin, 0.0005)
+    park_x_base = max(bin_x, bin_y) + 1.0
+    park_x_step = radius * 2.0 + 0.05
+    # With closely spaced spawns the previous object may still be falling inside
+    # the drop band, so drop positions must keep the hard separation anyway.
+    separation_required = int(spawn_settle_frames) < SPAWN_FALL_CLEAR_FRAMES
     bpy.context.scene.frame_set(1)
     for idx in range(count):
         obj = template.copy()
         obj.data = template.data
         obj.name = f"{safe_name}_{idx + 1:03d}"
         spawn_frame = 1 + idx * max(0, int(spawn_settle_frames))
-        obj.hide_viewport = spawn_frame > 1
-        obj.hide_render = spawn_frame > 1
+        can_park = spawn_frame - PARK_STATIC_LEAD_FRAMES >= 2
         z, layer = sample_drop_height(
             idx,
             count,
@@ -533,13 +723,29 @@ def create_object_instances(
             spawn_strategy,
             objects_per_layer,
         )
-        layer_xy = spawn_xy_by_layer.setdefault(layer, [])
-        x, y = sample_spawn_xy(bin_x, bin_y, margin, layer_xy, spawn_min_distance)
-        layer_xy.append((x, y))
-        obj.location = (x, y, z)
+        lift_steps = 0
+        if can_park and not separation_required:
+            # Parked objects never coexist mid-air, so the per-layer distance is
+            # only a spread heuristic, not a collision-safety requirement.
+            layer_xy = spawn_xy_by_layer.setdefault(layer, [])
+            x, y = sample_spawn_xy(bin_x, bin_y, margin, layer_xy, spawn_min_distance)
+            layer_xy.append((x, y))
+        else:
+            x, y, z, lift_steps = sample_separated_spawn_position(
+                bin_x,
+                bin_y,
+                margin,
+                z,
+                coexisting_drop_positions,
+                min_separation,
+            )
+            coexisting_drop_positions.append((x, y, z))
+        drop_location = (x, y, z)
+        obj.location = drop_location
         obj["spawn_layer"] = layer
         obj["spawn_height"] = z
         obj["spawn_edge_margin"] = margin
+        obj["spawn_z_lift_steps"] = int(lift_steps)
         obj.rotation_euler = random_rotation()
         obj.hide_viewport = False
         obj.hide_render = False
@@ -551,13 +757,23 @@ def create_object_instances(
         bpy.ops.rigidbody.object_add()
         obj.select_set(False)
         obj.rigid_body.type = "ACTIVE"
-        obj.rigid_body.mass = 0.08
-        obj.rigid_body.friction = 0.85
-        obj.rigid_body.restitution = object_restitution
-        obj.rigid_body.linear_damping = 0.35
-        obj.rigid_body.angular_damping = 0.45
-        obj.rigid_body.collision_shape = collision_shape
-        configure_rigid_body_margin(obj, collision_margin)
+        obj.rigid_body.mass = physics.mass_kg
+        obj.rigid_body.friction = physics.friction
+        obj.rigid_body.restitution = physics.restitution
+        obj.rigid_body.linear_damping = physics.linear_damping
+        obj.rigid_body.angular_damping = physics.angular_damping
+        obj.rigid_body.collision_shape = physics.collision_shape
+        configure_rigid_body_margin(obj, physics.collision_margin)
+        parked = False
+        if can_park:
+            park_location = (park_x_base + idx * park_x_step, 0.0, z)
+            parked = configure_parked_spawn_location(
+                obj,
+                spawn_frame=spawn_frame,
+                park_location=park_location,
+                drop_location=drop_location,
+            )
+        obj["spawn_parked"] = bool(parked)
         configure_delayed_rigid_body_activation(obj, spawn_frame)
         obj["spawn_frame"] = int(spawn_frame)
         objects.append(obj)
@@ -566,7 +782,7 @@ def create_object_instances(
         if idx == 0 or (idx + 1) % 5 == 0 or idx + 1 == count:
             synthetic_log(
                 f"[synthetic] scheduled object {idx + 1}/{count} "
-                f"spawn_frame={spawn_frame}"
+                f"spawn_frame={spawn_frame} parked={parked} z_lift_steps={lift_steps}"
             )
 
     template.hide_viewport = True
@@ -623,7 +839,7 @@ def setup_lighting(location: tuple[float, float, float], energy: float, size: fl
     bpy.context.scene.world.color = (0.018, 0.018, 0.02)
 
 
-def configure_physics(frame_end: int = 260) -> None:
+def configure_physics(frame_end: int = 260, substeps_per_frame: int = 60, solver_iterations: int = 30) -> None:
     scene = bpy.context.scene
     scene.frame_start = 1
     scene.frame_end = frame_end
@@ -631,14 +847,14 @@ def configure_physics(frame_end: int = 260) -> None:
     if not scene.rigidbody_world:
         bpy.ops.rigidbody.world_add()
     scene.rigidbody_world.time_scale = 1.0
-    scene.rigidbody_world.substeps_per_frame = 20
-    scene.rigidbody_world.solver_iterations = 30
+    scene.rigidbody_world.substeps_per_frame = max(1, int(substeps_per_frame))
+    scene.rigidbody_world.solver_iterations = max(1, int(solver_iterations))
     scene.rigidbody_world.point_cache.frame_start = 1
     scene.rigidbody_world.point_cache.frame_end = frame_end
 
 
-def reset_physics_cache(frames: int) -> None:
-    configure_physics(frames)
+def reset_physics_cache(frames: int, substeps_per_frame: int = 60, solver_iterations: int = 30) -> None:
+    configure_physics(frames, substeps_per_frame, solver_iterations)
     bpy.context.scene.frame_set(1)
     try:
         bpy.ops.ptcache.free_bake_all()
@@ -657,13 +873,24 @@ def settle_scene(frames: int, recorder: SimulationVideoRecorder | None = None) -
             recorder.record_current()
 
 
-def advance_scene_frames(frames: int, recorder: SimulationVideoRecorder | None = None) -> None:
+def advance_scene_frames(
+    frames: int,
+    recorder: SimulationVideoRecorder | None = None,
+    watchdog: PhysicsExplosionWatchdog | None = None,
+) -> dict[str, Any] | None:
+    """Step the simulation forward. Returns a watchdog violation dict on abort."""
+
     scene = bpy.context.scene
     start = scene.frame_current
     for frame in range(start + 1, start + frames + 1):
         scene.frame_set(frame)
         if recorder is not None:
             recorder.record_current()
+        if watchdog is not None:
+            violation = watchdog.check_current_frame()
+            if violation is not None:
+                return violation
+    return None
 
 
 def simulation_frame_count(args: argparse.Namespace) -> int:
@@ -1123,6 +1350,8 @@ def write_sample_outputs(
                 "spawn_height": float(obj.get("spawn_height", 0.0)),
                 "spawn_frame": int(obj.get("spawn_frame", 1)),
                 "spawn_edge_margin": float(obj.get("spawn_edge_margin", 0.0)),
+                "spawn_parked": bool(obj.get("spawn_parked", False)),
+                "spawn_z_lift_steps": int(obj.get("spawn_z_lift_steps", 0)),
                 "original_model_center_offset": [float(v) for v in obj.get("original_model_center_offset", [0.0, 0.0, 0.0])],
                 "model_scale": float(obj.get("model_scale", 1.0)),
                 "original_model_to_body": matrix_to_list(original_to_body),
@@ -1148,7 +1377,7 @@ def sample_visibility_stats(sensor: dict[str, np.ndarray | dict[str, float]]) ->
 
 def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> GenerationScene:
     clean_scene()
-    configure_physics(args.settle_frames)
+    configure_physics(args.settle_frames, args.physics_substeps, args.physics_solver_iterations)
     create_bin(args.bin_x, args.bin_y, args.bin_wall_height, args.collision_margin)
     template = import_stl(model_path, args.class_name, args.model_scale)
     depth_camera = setup_camera(
@@ -1193,7 +1422,7 @@ def build_sample(
     attempt_idx: int,
     model_path: Path,
     output_dir: Path,
-) -> tuple[bool, dict[str, int | str | list[int]]]:
+) -> tuple[bool, dict[str, Any]]:
     seed = args.seed + sample_idx * 1009 + attempt_idx
     random.seed(seed)
     np.random.seed(seed)
@@ -1206,7 +1435,16 @@ def build_sample(
         f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
         f"objects={args.objects}, simulation_frames={total_frames}"
     )
-    reset_physics_cache(total_frames)
+    reset_physics_cache(total_frames, args.physics_substeps, args.physics_solver_iterations)
+    physics_settings = ObjectPhysicsSettings(
+        mass_kg=args.object_mass,
+        friction=0.85,
+        restitution=args.object_restitution,
+        linear_damping=args.object_linear_damping,
+        angular_damping=args.object_angular_damping,
+        collision_margin=args.collision_margin,
+        collision_shape=args.collision_shape,
+    )
     objects = create_object_instances(
         scene_context.template,
         scene_context.class_name,
@@ -1221,24 +1459,54 @@ def build_sample(
         args.objects_per_layer,
         args.spawn_min_distance,
         args.spawn_settle_frames,
-        args.collision_margin,
-        args.collision_shape,
-        args.object_restitution,
+        physics_settings,
         recorder=recorder,
     )
     all_objects = objects
+    max_spawn_z = max((float(obj.get("spawn_height", 0.0)) for obj in objects), default=0.0)
+    if args.explosion_speed_limit is None:
+        effective_speed_limit = auto_explosion_speed_limit(max_spawn_z)
+    else:
+        effective_speed_limit = float(args.explosion_speed_limit)
+    watchdog = PhysicsExplosionWatchdog(
+        enabled=effective_speed_limit > 0.0,
+        speed_limit_m_s=effective_speed_limit,
+        z_min_limit_m=-0.05,
+        z_max_limit_m=max_spawn_z + 0.25,
+        fps=float(bpy.context.scene.render.fps),
+        objects=objects,
+        spawn_frames={obj.name: int(obj.get("spawn_frame", 1)) for obj in objects},
+    )
+    parked_spawns = sum(1 for obj in objects if bool(obj.get("spawn_parked", False)))
+    spawn_z_lift_events = sum(1 for obj in objects if int(obj.get("spawn_z_lift_steps", 0)) > 0)
     try:
         recorder.record_current(force=True)
         synthetic_log(
             f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
-            f"running delayed-activation physics frames 1..{total_frames}"
+            f"running delayed-activation physics frames 1..{total_frames} "
+            f"(parked_spawns={parked_spawns}, speed_limit={effective_speed_limit:.2f} m/s)"
         )
-        advance_scene_frames(max(0, total_frames - int(bpy.context.scene.frame_current)), recorder=recorder)
+        violation = advance_scene_frames(
+            max(0, total_frames - int(bpy.context.scene.frame_current)),
+            recorder=recorder,
+            watchdog=watchdog,
+        )
+        if violation is not None:
+            stats_explosion: dict[str, Any] = {
+                "spawned_objects": len(objects),
+                "parked_spawns": parked_spawns,
+                "spawn_z_lift_events": spawn_z_lift_events,
+                "reason": "physics_explosion",
+                "explosion": violation,
+            }
+            return False, stats_explosion
         bpy.context.scene.frame_set(total_frames)
         recorder.record_current(force=True)
         out_of_bin_objects = find_out_of_bin_objects(objects, args.bin_x, args.bin_y, args.out_of_bin_tolerance)
-        stats: dict[str, int | str | list[int]] = {
+        stats: dict[str, Any] = {
             "spawned_objects": len(objects),
+            "parked_spawns": parked_spawns,
+            "spawn_z_lift_events": spawn_z_lift_events,
             "in_bin_objects": len(objects) - len(out_of_bin_objects),
             "out_of_bin_objects": len(out_of_bin_objects),
             "out_of_bin_ids": [objects.index(obj) + 1 for obj in out_of_bin_objects],
@@ -1276,6 +1544,15 @@ def build_sample(
             "model_scale": args.model_scale,
             "collision_shape": args.collision_shape,
             "object_restitution": args.object_restitution,
+            "object_mass": args.object_mass,
+            "object_linear_damping": args.object_linear_damping,
+            "object_angular_damping": args.object_angular_damping,
+            "physics_substeps": args.physics_substeps,
+            "physics_solver_iterations": args.physics_solver_iterations,
+            "explosion_speed_limit_m_s": effective_speed_limit,
+            "spawn_parking_lead_frames": PARK_STATIC_LEAD_FRAMES,
+            "parked_spawns": parked_spawns,
+            "spawn_z_lift_events": spawn_z_lift_events,
             "depth_camera_location": list(args.depth_camera_location),
             "depth_camera_target": list(args.depth_camera_target),
             "depth_camera_lens": args.depth_camera_lens,
@@ -1403,6 +1680,13 @@ def main() -> None:
         "model_scale": args.model_scale,
         "collision_shape": args.collision_shape,
         "object_restitution": args.object_restitution,
+        "object_mass": args.object_mass,
+        "object_linear_damping": args.object_linear_damping,
+        "object_angular_damping": args.object_angular_damping,
+        "physics_substeps": args.physics_substeps,
+        "physics_solver_iterations": args.physics_solver_iterations,
+        "explosion_speed_limit": args.explosion_speed_limit if args.explosion_speed_limit is not None else "auto",
+        "spawn_parking_lead_frames": PARK_STATIC_LEAD_FRAMES,
         "depth_camera_location": list(args.depth_camera_location),
         "depth_camera_target": list(args.depth_camera_target),
         "depth_camera_lens": args.depth_camera_lens,
