@@ -299,11 +299,13 @@ def _check_out_of_bin(metadata: dict[str, Any], dataset_root: Path, project_root
             out_of_bin_ids.append(instance_id)
             continue
         world_corners = (object_to_world @ corners.T).T[:, :3]
+        # Center-based test: a long part lying at an angle with its center inside
+        # but its bbox poking past the wall is a valid bin pose, not an ejection.
+        # The XY check uses the bbox center; the floor check uses the lowest point.
+        center_xy = 0.5 * (world_corners[:, :2].min(axis=0) + world_corners[:, :2].max(axis=0))
         in_bounds = (
-            float(world_corners[:, 0].min()) >= -x_limit
-            and float(world_corners[:, 0].max()) <= x_limit
-            and float(world_corners[:, 1].min()) >= -y_limit
-            and float(world_corners[:, 1].max()) <= y_limit
+            abs(float(center_xy[0])) <= x_limit
+            and abs(float(center_xy[1])) <= y_limit
             and float(world_corners[:, 2].min()) >= min_z
         )
         if not in_bounds:
