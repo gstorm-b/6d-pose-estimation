@@ -77,19 +77,24 @@ class SimulationVideoRecorder:
         self.objects.append(obj)
         self.spawn_frames[obj.name] = int(spawn_frame if spawn_frame is not None else bpy.context.scene.frame_current)
         self.samples.setdefault(obj.name, {})
-        self.record_current(force=True)
 
-    def record_current(self, *, force: bool = False) -> None:
+    def record_current(self, *, force: bool = False, frame_override: int | None = None) -> None:
+        # Progressive baking re-bakes each object from frame 1, so the caller
+        # passes a monotonically increasing global frame to keep one continuous
+        # video timeline instead of overwriting frame 1..window every stage.
         if not self.enabled:
             return
-        frame = int(bpy.context.scene.frame_current)
+        frame = int(frame_override if frame_override is not None else bpy.context.scene.frame_current)
         bpy.context.view_layer.update()
+        depsgraph = bpy.context.evaluated_depsgraph_get()
         assert self.objects is not None
         assert self.samples is not None
         for obj in self.objects:
             if obj.name not in bpy.data.objects:
                 continue
-            matrix_world = obj.matrix_world.copy()
+            # Read the evaluated transform so baked rigid-body motion is captured
+            # even in progressive mode, where the basis matrix_world stays at spawn.
+            matrix_world = obj.evaluated_get(depsgraph).matrix_world.copy()
             location = matrix_world.to_translation()
             rotation = matrix_world.to_euler()
             self.samples.setdefault(obj.name, {})[frame] = (
@@ -180,6 +185,17 @@ class ObjectPhysicsSettings:
     collision_shape: str
 
 
+def evaluated_translation(obj: bpy.types.Object) -> Vector:
+    """World-space origin of an object after rigid-body evaluation.
+
+    Baked rigid-body results are written to the evaluated object, not the basis
+    matrix_world, so progressive baking must read the evaluated transform.
+    """
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    return obj.evaluated_get(depsgraph).matrix_world.translation.copy()
+
+
 @dataclass
 class PhysicsExplosionWatchdog:
     """Abort an attempt early when solver impulses eject an object at unphysical speed.
@@ -197,6 +213,7 @@ class PhysicsExplosionWatchdog:
     spawn_frames: dict[str, int] = field(default_factory=dict)
     previous_locations: dict[str, Vector] = field(default_factory=dict)
     violation: dict[str, Any] | None = None
+    use_evaluated: bool = False
 
     def check_current_frame(self) -> dict[str, Any] | None:
         if not self.enabled or self.violation is not None:
@@ -207,7 +224,7 @@ class PhysicsExplosionWatchdog:
                 continue
             if frame < int(self.spawn_frames.get(obj.name, 1)):
                 continue
-            location = obj.matrix_world.translation.copy()
+            location = evaluated_translation(obj) if self.use_evaluated else obj.matrix_world.translation.copy()
             previous = self.previous_locations.get(obj.name)
             self.previous_locations[obj.name] = location
             if previous is None:
@@ -273,10 +290,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--objects-per-layer", type=int, default=6)
     parser.add_argument("--spawn-min-distance", type=float, default=0.045)
     parser.add_argument(
+        "--spawn-mode",
+        choices=("progressive", "delayed", "batch"),
+        default="progressive",
+        help=(
+            "progressive: drop one object at a time just above the current pile, settle, freeze "
+            "as a passive collider, then drop the next (PyBullet-style, fewest out-of-bin ejections). "
+            "delayed: legacy parked delayed-activation. batch: all objects active from frame 1."
+        ),
+    )
+    parser.add_argument(
+        "--drop-clearance-min",
+        type=float,
+        default=0.03,
+        help="Progressive mode: minimum drop height above the current pile top, in meters.",
+    )
+    parser.add_argument(
+        "--drop-clearance-max",
+        type=float,
+        default=0.12,
+        help="Progressive mode: maximum drop height above the current pile top, in meters.",
+    )
+    parser.add_argument(
+        "--progressive-settle-frames",
+        type=int,
+        default=45,
+        help="Progressive mode: frames simulated for each object to fall and settle before freezing it.",
+    )
+    parser.add_argument(
+        "--final-relax-frames",
+        type=int,
+        default=60,
+        help="Progressive mode: frames of a final all-active relaxation so the pile self-adjusts.",
+    )
+    parser.add_argument(
         "--spawn-settle-frames",
         type=int,
         default=35,
-        help="If > 0, enable one active rigid body at a time after this many settle frames before enabling the next object.",
+        help="delayed/batch modes: if > 0, enable one active rigid body at a time after this many settle frames.",
     )
     parser.add_argument(
         "--collision-margin",
@@ -324,6 +375,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-sample-attempts", type=int, default=8)
     parser.add_argument("--settle-frames", type=int, default=220)
     parser.add_argument("--record-simulation-video", action="store_true", help="Render an MP4 preview of the accepted sample's object drop/settle animation.")
+    parser.add_argument(
+        "--record-failed-video",
+        action="store_true",
+        help="Also render an MP4 of each rejected attempt into <output>/rejected/ for failure investigation.",
+    )
     parser.add_argument("--simulation-video-name", default="spawn_simulation.mp4")
     parser.add_argument("--simulation-video-frame-step", type=int, default=4, help="Render every Nth simulation frame in the preview video.")
     parser.add_argument("--simulation-video-fps", type=int, default=24)
@@ -672,6 +728,213 @@ def configure_delayed_rigid_body_activation(obj: bpy.types.Object, spawn_frame: 
         set_animation_interpolation(obj.animation_data.action, location_interpolation="CONSTANT")
 
 
+def apply_object_material(template: bpy.types.Object, class_name: str) -> str:
+    """Assign the shared black-metal material to the template and return its safe name."""
+
+    safe_name = sanitize_blender_name(class_name)
+    mat = make_material(f"mat_{safe_name}_black_metal", (0.015, 0.014, 0.013, 1.0), metallic=0.85, roughness=0.85)
+    template.data.materials.clear()
+    template.data.materials.append(mat)
+    return safe_name
+
+
+def spawn_active_object_copy(
+    template: bpy.types.Object,
+    safe_name: str,
+    idx: int,
+    location: tuple[float, float, float],
+    physics: ObjectPhysicsSettings,
+) -> bpy.types.Object:
+    """Create one linked-mesh copy as an active rigid body at the given location."""
+
+    obj = template.copy()
+    obj.data = template.data
+    obj.name = f"{safe_name}_{idx + 1:03d}"
+    obj.location = location
+    obj.rotation_euler = random_rotation()
+    obj.hide_viewport = False
+    obj.hide_render = False
+    bpy.context.collection.objects.link(obj)
+    bpy.context.view_layer.update()
+    bpy.ops.object.select_all(action="DESELECT")
+    bpy.context.view_layer.objects.active = obj
+    obj.select_set(True)
+    bpy.ops.rigidbody.object_add()
+    obj.select_set(False)
+    obj.rigid_body.type = "ACTIVE"
+    obj.rigid_body.mass = physics.mass_kg
+    obj.rigid_body.friction = physics.friction
+    obj.rigid_body.restitution = physics.restitution
+    obj.rigid_body.linear_damping = physics.linear_damping
+    obj.rigid_body.angular_damping = physics.angular_damping
+    obj.rigid_body.collision_shape = physics.collision_shape
+    configure_rigid_body_margin(obj, physics.collision_margin)
+    return obj
+
+
+def pile_top_z(objects: list[bpy.types.Object]) -> float:
+    """Highest world-space z of any already-placed object bbox, floor at 0."""
+
+    top = 0.0
+    for obj in objects:
+        if obj.name not in bpy.data.objects:
+            continue
+        _min_corner, max_corner = object_world_bounds(obj)
+        top = max(top, float(max_corner.z))
+    return top
+
+
+def freeze_object_as_passive(obj: bpy.types.Object) -> None:
+    """Bake the current settled pose into the object base and make it a static collider.
+
+    Progressive baking re-bakes from frame 1 each time a new object is added, so a
+    settled object must hold its pose with zero motion. A PASSIVE rigid body at its
+    settled base pose stays perfectly still (verified drift 0.000 mm) while still
+    colliding with later falling objects.
+    """
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    settled = obj.evaluated_get(depsgraph).matrix_world.copy()
+    bpy.context.scene.frame_set(1)
+    obj.animation_data_clear()
+    obj.location = settled.to_translation()
+    obj.rotation_euler = settled.to_euler()
+    if obj.rigid_body is not None:
+        obj.rigid_body.type = "PASSIVE"
+        obj.rigid_body.kinematic = False
+
+
+def simulate_progressive(
+    template: bpy.types.Object,
+    class_name: str,
+    count: int,
+    bin_x: float,
+    bin_y: float,
+    drop_clearance_min: float,
+    drop_clearance_max: float,
+    progressive_settle_frames: int,
+    final_relax_frames: int,
+    physics: ObjectPhysicsSettings,
+    substeps: int,
+    solver_iterations: int,
+    watchdog_speed_limit: float,
+    out_of_bin_min_z: float,
+    recorder: SimulationVideoRecorder | None = None,
+) -> tuple[list[bpy.types.Object], dict[str, Any] | None, int]:
+    """Drop objects one at a time, settling and freezing each before the next.
+
+    Returns (objects, explosion_violation_or_None, total_global_frames). Each
+    object falls a short clearance above the current pile top, so impact energy
+    stays low and objects rarely roll out of the bin. Only one active body
+    simulates per stage, so there are no mid-air collisions.
+    """
+
+    safe_name = apply_object_material(template, class_name)
+    margin = object_spawn_edge_margin(template, bin_x, bin_y, physics.collision_margin)
+    radius = object_bounding_radius(template)
+    x_min = -bin_x / 2.0 + margin
+    x_max = bin_x / 2.0 - margin
+    y_min = -bin_y / 2.0 + margin
+    y_max = bin_y / 2.0 - margin
+    window = max(1, int(progressive_settle_frames))
+    fps = float(bpy.context.scene.render.fps)
+    scene = bpy.context.scene
+
+    objects: list[bpy.types.Object] = []
+    global_frame = 1
+    for idx in range(count):
+        top = pile_top_z(objects)
+        clearance = random.uniform(drop_clearance_min, drop_clearance_max)
+        # The mesh is recentered on its bbox center, so any rotation can put a
+        # vertex up to `radius` below the origin. Drop the origin a full radius
+        # above the pile so the object never spawns interpenetrating it.
+        drop_z = top + radius + clearance
+        if x_min > x_max or y_min > y_max:
+            x = y = 0.0
+        else:
+            x = random.uniform(x_min, x_max)
+            y = random.uniform(y_min, y_max)
+        obj = spawn_active_object_copy(template, safe_name, idx, (x, y, drop_z), physics)
+        obj["spawn_layer"] = idx
+        obj["spawn_height"] = drop_z
+        obj["spawn_edge_margin"] = margin
+        obj["spawn_z_lift_steps"] = 0
+        obj["spawn_parked"] = False
+        obj["spawn_frame"] = global_frame
+        objects.append(obj)
+        if recorder is not None:
+            recorder.register_object(obj, spawn_frame=global_frame)
+
+        bake_physics_window(window, substeps, solver_iterations)
+        watchdog = PhysicsExplosionWatchdog(
+            enabled=watchdog_speed_limit > 0.0,
+            speed_limit_m_s=watchdog_speed_limit,
+            z_min_limit_m=out_of_bin_min_z,
+            z_max_limit_m=drop_z + 0.30,
+            fps=fps,
+            objects=[obj],
+            spawn_frames={obj.name: 1},
+            use_evaluated=True,
+        )
+        violation: dict[str, Any] | None = None
+        for frame in range(1, window + 1):
+            scene.frame_set(frame)
+            # Force the rigid-body result into matrix_world. Without recording,
+            # frame_set after free_bake_all leaves matrix_world stale, so the
+            # watchdog and freeze would read the spawn pose instead of the fall.
+            bpy.context.view_layer.update()
+            if recorder is not None:
+                recorder.record_current(frame_override=global_frame)
+            global_frame += 1
+            violation = watchdog.check_current_frame()
+            if violation is not None:
+                break
+        if violation is not None:
+            violation["stage"] = idx + 1
+            return objects, violation, global_frame
+
+        settled_z = float(evaluated_translation(obj).z)
+        freeze_object_as_passive(obj)
+        if idx == 0 or (idx + 1) % 5 == 0 or idx + 1 == count:
+            synthetic_log(
+                f"[synthetic] progressive dropped object {idx + 1}/{count} "
+                f"pile_top={top:.3f} drop_z={drop_z:.3f} settled_z={settled_z:.3f}"
+            )
+
+    template.hide_viewport = True
+    template.hide_render = True
+
+    relax_frames = max(0, int(final_relax_frames))
+    if relax_frames > 0 and objects:
+        for obj in objects:
+            obj.animation_data_clear()
+            if obj.rigid_body is not None:
+                obj.rigid_body.type = "ACTIVE"
+        bake_physics_window(relax_frames, substeps, solver_iterations)
+        relax_watchdog = PhysicsExplosionWatchdog(
+            enabled=watchdog_speed_limit > 0.0,
+            speed_limit_m_s=watchdog_speed_limit,
+            z_min_limit_m=out_of_bin_min_z,
+            z_max_limit_m=pile_top_z(objects) + 0.30,
+            fps=fps,
+            objects=list(objects),
+            spawn_frames={obj.name: 1 for obj in objects},
+            use_evaluated=True,
+        )
+        for frame in range(1, relax_frames + 1):
+            scene.frame_set(frame)
+            bpy.context.view_layer.update()
+            if recorder is not None:
+                recorder.record_current(frame_override=global_frame)
+            global_frame += 1
+            violation = relax_watchdog.check_current_frame()
+            if violation is not None:
+                violation["stage"] = "final_relax"
+                return objects, violation, global_frame
+
+    return objects, None, global_frame
+
+
 def create_object_instances(
     template: bpy.types.Object,
     class_name: str,
@@ -689,10 +952,7 @@ def create_object_instances(
     physics: ObjectPhysicsSettings,
     recorder: SimulationVideoRecorder | None = None,
 ) -> list[bpy.types.Object]:
-    safe_name = sanitize_blender_name(class_name)
-    mat = make_material(f"mat_{safe_name}_black_metal", (0.015, 0.014, 0.013, 1.0), metallic=0.85, roughness=0.85)
-    template.data.materials.clear()
-    template.data.materials.append(mat)
+    safe_name = apply_object_material(template, class_name)
 
     objects = []
     spawn_xy_by_layer: dict[int, list[tuple[float, float]]] = {}
@@ -862,6 +1122,22 @@ def reset_physics_cache(frames: int, substeps_per_frame: int = 60, solver_iterat
         pass
 
 
+def bake_physics_window(frames: int, substeps_per_frame: int, solver_iterations: int) -> None:
+    """Free and re-bake the rigid-body cache for a fresh [1, frames] window.
+
+    Progressive baking adds one rigid body and re-bakes from frame 1 each stage.
+    An explicit bake_all is required: after free_bake_all, plain frame stepping
+    can leave matrix_world at the spawn pose in background mode.
+    """
+
+    reset_physics_cache(frames, substeps_per_frame, solver_iterations)
+    bpy.context.view_layer.update()
+    try:
+        bpy.ops.ptcache.bake_all(bake=True)
+    except RuntimeError:
+        pass
+
+
 def settle_scene(frames: int, recorder: SimulationVideoRecorder | None = None) -> None:
     scene = bpy.context.scene
     scene.frame_set(1)
@@ -894,6 +1170,8 @@ def advance_scene_frames(
 
 
 def simulation_frame_count(args: argparse.Namespace) -> int:
+    if args.spawn_mode == "progressive":
+        return args.objects * max(1, args.progressive_settle_frames) + max(0, args.final_relax_frames)
     if args.spawn_settle_frames <= 0:
         return args.settle_frames
     return 1 + args.settle_frames + max(0, args.objects - 1) * args.spawn_settle_frames
@@ -938,21 +1216,61 @@ def find_out_of_bin_objects(
     out_of_bin_tolerance: float,
     min_z: float = -0.04,
 ) -> list[bpy.types.Object]:
+    """Center-based out-of-bin test.
+
+    An object counts as out of bin only when its center (recentered bbox origin)
+    leaves the bin footprint, or its lowest point drops through the floor. A long
+    part lying at an angle with its center inside but its bbox poking past the
+    wall is a valid bin pose, not an ejection.
+    """
+
     x_limit = bin_x / 2.0 + out_of_bin_tolerance
     y_limit = bin_y / 2.0 + out_of_bin_tolerance
     out_of_bin = []
     for obj in objects:
-        min_corner, max_corner = object_world_bounds(obj)
+        center = evaluated_translation(obj)
+        min_corner, _max_corner = object_world_bounds(obj)
         in_bounds = (
-            float(min_corner.x) >= -x_limit
-            and float(max_corner.x) <= x_limit
-            and float(min_corner.y) >= -y_limit
-            and float(max_corner.y) <= y_limit
+            abs(float(center.x)) <= x_limit
+            and abs(float(center.y)) <= y_limit
             and float(min_corner.z) >= min_z
         )
         if not in_bounds:
             out_of_bin.append(obj)
     return out_of_bin
+
+
+def describe_out_of_bin(
+    objects: list[bpy.types.Object],
+    out_of_bin_objects: list[bpy.types.Object],
+    bin_x: float,
+    bin_y: float,
+    out_of_bin_tolerance: float,
+) -> list[dict[str, Any]]:
+    """Per-object diagnostics: is the center still inside, and how far the bbox overshoots.
+
+    This distinguishes a real ejection (center outside the bin) from a long part
+    whose bbox merely pokes past the wall while its center stays inside.
+    """
+
+    details = []
+    for obj in out_of_bin_objects:
+        center = evaluated_translation(obj)
+        min_corner, _max_corner = object_world_bounds(obj)
+        center_overshoot_mm = 1000.0 * max(
+            abs(float(center.x)) - bin_x / 2.0,
+            abs(float(center.y)) - bin_y / 2.0,
+            0.0,
+        )
+        details.append(
+            {
+                "id": objects.index(obj) + 1,
+                "center_xy": [round(float(center.x), 4), round(float(center.y), 4)],
+                "center_overshoot_mm": round(center_overshoot_mm, 1),
+                "min_z": round(float(min_corner.z), 4),
+            }
+        )
+    return details
 
 
 def hide_objects(objects: list[bpy.types.Object]) -> None:
@@ -1415,36 +1733,43 @@ def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> Genera
     )
 
 
-def build_sample(
+def simulate_attempt(
     args: argparse.Namespace,
     scene_context: GenerationScene,
-    sample_idx: int,
-    attempt_idx: int,
-    model_path: Path,
-    output_dir: Path,
-) -> tuple[bool, dict[str, Any]]:
-    seed = args.seed + sample_idx * 1009 + attempt_idx
-    random.seed(seed)
-    np.random.seed(seed)
+    physics_settings: ObjectPhysicsSettings,
+    recorder: SimulationVideoRecorder,
+) -> tuple[list[bpy.types.Object], dict[str, Any] | None, float, int, dict[str, int]]:
+    """Run the configured spawn mode and return objects, explosion, speed limit, video frame end, spawn stats."""
+
     total_frames = simulation_frame_count(args)
-    recorder = SimulationVideoRecorder(
-        enabled=bool(args.record_simulation_video),
-        frame_step=int(args.simulation_video_frame_step),
-    )
-    synthetic_log(
-        f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
-        f"objects={args.objects}, simulation_frames={total_frames}"
-    )
+    if args.spawn_mode == "progressive":
+        if args.explosion_speed_limit is None:
+            # Objects fall only the drop clearance above the pile, so the speed
+            # bound comes from the clearance, not the absolute pile height.
+            effective_speed_limit = auto_explosion_speed_limit(args.drop_clearance_max)
+        else:
+            effective_speed_limit = float(args.explosion_speed_limit)
+        objects, violation, used_frames = simulate_progressive(
+            scene_context.template,
+            scene_context.class_name,
+            args.objects,
+            args.bin_x,
+            args.bin_y,
+            args.drop_clearance_min,
+            args.drop_clearance_max,
+            args.progressive_settle_frames,
+            args.final_relax_frames,
+            physics_settings,
+            args.physics_substeps,
+            args.physics_solver_iterations,
+            effective_speed_limit,
+            -0.05,
+            recorder=recorder,
+        )
+        video_frame_end = max(used_frames, recorder.last_recorded_frame)
+        return objects, violation, effective_speed_limit, video_frame_end, {"parked_spawns": 0, "spawn_z_lift_events": 0}
+
     reset_physics_cache(total_frames, args.physics_substeps, args.physics_solver_iterations)
-    physics_settings = ObjectPhysicsSettings(
-        mass_kg=args.object_mass,
-        friction=0.85,
-        restitution=args.object_restitution,
-        linear_damping=args.object_linear_damping,
-        angular_damping=args.object_angular_damping,
-        collision_margin=args.collision_margin,
-        collision_shape=args.collision_shape,
-    )
     objects = create_object_instances(
         scene_context.template,
         scene_context.class_name,
@@ -1462,7 +1787,6 @@ def build_sample(
         physics_settings,
         recorder=recorder,
     )
-    all_objects = objects
     max_spawn_z = max((float(obj.get("spawn_height", 0.0)) for obj in objects), default=0.0)
     if args.explosion_speed_limit is None:
         effective_speed_limit = auto_explosion_speed_limit(max_spawn_z)
@@ -1477,52 +1801,110 @@ def build_sample(
         objects=objects,
         spawn_frames={obj.name: int(obj.get("spawn_frame", 1)) for obj in objects},
     )
-    parked_spawns = sum(1 for obj in objects if bool(obj.get("spawn_parked", False)))
-    spawn_z_lift_events = sum(1 for obj in objects if int(obj.get("spawn_z_lift_steps", 0)) > 0)
-    try:
-        recorder.record_current(force=True)
-        synthetic_log(
-            f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
-            f"running delayed-activation physics frames 1..{total_frames} "
-            f"(parked_spawns={parked_spawns}, speed_limit={effective_speed_limit:.2f} m/s)"
-        )
-        violation = advance_scene_frames(
-            max(0, total_frames - int(bpy.context.scene.frame_current)),
-            recorder=recorder,
-            watchdog=watchdog,
-        )
-        if violation is not None:
-            stats_explosion: dict[str, Any] = {
-                "spawned_objects": len(objects),
-                "parked_spawns": parked_spawns,
-                "spawn_z_lift_events": spawn_z_lift_events,
-                "reason": "physics_explosion",
-                "explosion": violation,
-            }
-            return False, stats_explosion
+    spawn_stats = {
+        "parked_spawns": sum(1 for obj in objects if bool(obj.get("spawn_parked", False))),
+        "spawn_z_lift_events": sum(1 for obj in objects if int(obj.get("spawn_z_lift_steps", 0)) > 0),
+    }
+    recorder.record_current(force=True)
+    violation = advance_scene_frames(
+        max(0, total_frames - int(bpy.context.scene.frame_current)),
+        recorder=recorder,
+        watchdog=watchdog,
+    )
+    if violation is None:
         bpy.context.scene.frame_set(total_frames)
         recorder.record_current(force=True)
-        out_of_bin_objects = find_out_of_bin_objects(objects, args.bin_x, args.bin_y, args.out_of_bin_tolerance)
+    video_frame_end = max(total_frames, int(bpy.context.scene.frame_current), recorder.last_recorded_frame)
+    return objects, violation, effective_speed_limit, video_frame_end, spawn_stats
+
+
+def build_sample(
+    args: argparse.Namespace,
+    scene_context: GenerationScene,
+    sample_idx: int,
+    attempt_idx: int,
+    model_path: Path,
+    output_dir: Path,
+) -> tuple[bool, dict[str, Any]]:
+    seed = args.seed + sample_idx * 1009 + attempt_idx
+    random.seed(seed)
+    np.random.seed(seed)
+    total_frames = simulation_frame_count(args)
+    recorder = SimulationVideoRecorder(
+        enabled=bool(args.record_simulation_video or args.record_failed_video),
+        frame_step=int(args.simulation_video_frame_step),
+    )
+    physics_settings = ObjectPhysicsSettings(
+        mass_kg=args.object_mass,
+        friction=0.85,
+        restitution=args.object_restitution,
+        linear_damping=args.object_linear_damping,
+        angular_damping=args.object_angular_damping,
+        collision_margin=args.collision_margin,
+        collision_shape=args.collision_shape,
+    )
+    synthetic_log(
+        f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
+        f"spawn_mode={args.spawn_mode}, objects={args.objects}, simulation_frames={total_frames}"
+    )
+    objects, violation, effective_speed_limit, video_frame_end, spawn_stats = simulate_attempt(
+        args, scene_context, physics_settings, recorder
+    )
+    all_objects = objects
+    parked_spawns = int(spawn_stats["parked_spawns"])
+    spawn_z_lift_events = int(spawn_stats["spawn_z_lift_events"])
+    try:
         stats: dict[str, Any] = {
             "spawned_objects": len(objects),
             "parked_spawns": parked_spawns,
             "spawn_z_lift_events": spawn_z_lift_events,
-            "in_bin_objects": len(objects) - len(out_of_bin_objects),
-            "out_of_bin_objects": len(out_of_bin_objects),
-            "out_of_bin_ids": [objects.index(obj) + 1 for obj in out_of_bin_objects],
         }
-        if out_of_bin_objects and not args.allow_out_of_bin_filtering:
-            stats["reason"] = "out_of_bin"
-            return False, stats
-        if out_of_bin_objects:
-            hide_objects(out_of_bin_objects)
-            objects = [obj for obj in objects if obj not in out_of_bin_objects]
+        reject_reason: str | None = None
+        sensor: dict[str, np.ndarray | dict[str, float]] | None = None
+        visible_objects = objects
 
-        sensor = raycast_sensor_data(scene_context.depth_camera, objects, args.width, args.height)
-        stats.update(sample_visibility_stats(sensor))
-        target_visible_objects = min(args.objects, args.min_visible_objects)
-        if int(stats["visible_objects"]) < target_visible_objects or int(stats["visible_points"]) < args.min_visible_points:
-            stats["reason"] = "visibility"
+        if violation is not None:
+            reject_reason = "physics_explosion"
+            stats["reason"] = "physics_explosion"
+            stats["explosion"] = violation
+        else:
+            out_of_bin_objects = find_out_of_bin_objects(objects, args.bin_x, args.bin_y, args.out_of_bin_tolerance)
+            stats["in_bin_objects"] = len(objects) - len(out_of_bin_objects)
+            stats["out_of_bin_objects"] = len(out_of_bin_objects)
+            stats["out_of_bin_ids"] = [objects.index(obj) + 1 for obj in out_of_bin_objects]
+            if out_of_bin_objects:
+                stats["out_of_bin_detail"] = describe_out_of_bin(
+                    objects, out_of_bin_objects, args.bin_x, args.bin_y, args.out_of_bin_tolerance
+                )
+            if out_of_bin_objects and not args.allow_out_of_bin_filtering:
+                reject_reason = "out_of_bin"
+                stats["reason"] = "out_of_bin"
+            else:
+                if out_of_bin_objects:
+                    hide_objects(out_of_bin_objects)
+                    visible_objects = [obj for obj in objects if obj not in out_of_bin_objects]
+                sensor = raycast_sensor_data(scene_context.depth_camera, visible_objects, args.width, args.height)
+                stats.update(sample_visibility_stats(sensor))
+                target_visible_objects = min(args.objects, args.min_visible_objects)
+                if int(stats["visible_objects"]) < target_visible_objects or int(stats["visible_points"]) < args.min_visible_points:
+                    reject_reason = "visibility"
+                    stats["reason"] = "visibility"
+
+        if reject_reason is not None:
+            if args.record_failed_video and all_objects:
+                rejected_dir = output_dir / "rejected"
+                fail_video = rejected_dir / f"sample_{sample_idx:06d}_attempt_{attempt_idx + 1:02d}_{reject_reason}.mp4"
+                synthetic_log(f"[synthetic] recording failed-attempt video: {fail_video}")
+                render_simulation_video(
+                    fail_video,
+                    scene_context.debug_camera,
+                    all_objects,
+                    recorder=recorder,
+                    frame_end=video_frame_end,
+                    frame_step=args.simulation_video_frame_step,
+                    fps=args.simulation_video_fps,
+                    resolution_percent=args.simulation_video_resolution_percent,
+                )
             return False, stats
 
         settings = {
@@ -1535,8 +1917,12 @@ def build_sample(
             "drop_height_jitter": args.drop_height_jitter,
             "drop_height_min": args.drop_height_min,
             "drop_height_max": args.drop_height_max,
+            "drop_clearance_min": args.drop_clearance_min,
+            "drop_clearance_max": args.drop_clearance_max,
             "spawn_strategy": args.spawn_strategy,
-            "spawn_mode": "delayed_rigid_body_activation" if args.spawn_settle_frames > 0 else "batch_active",
+            "spawn_mode": args.spawn_mode,
+            "progressive_settle_frames": args.progressive_settle_frames,
+            "final_relax_frames": args.final_relax_frames,
             "objects_per_layer": args.objects_per_layer,
             "spawn_min_distance": args.spawn_min_distance,
             "spawn_settle_frames": args.spawn_settle_frames,
@@ -1568,12 +1954,13 @@ def build_sample(
             "out_of_bin_tolerance": args.out_of_bin_tolerance,
             "allow_out_of_bin_filtering": args.allow_out_of_bin_filtering,
             "out_of_bin_policy": "filter" if args.allow_out_of_bin_filtering else "reject_attempt",
-            "out_of_bin_check": "world_bbox_xy",
+            "out_of_bin_check": "world_center_xy",
             "min_visible_objects": args.min_visible_objects,
             "min_visible_points": args.min_visible_points,
             "settle_frames": args.settle_frames,
             "simulation_frames": total_frames,
             "record_simulation_video": args.record_simulation_video,
+            "record_failed_video": args.record_failed_video,
             "simulation_video_name": args.simulation_video_name,
             "simulation_video_frame_step": args.simulation_video_frame_step,
             "simulation_video_fps": args.simulation_video_fps,
@@ -1588,7 +1975,7 @@ def build_sample(
             scene_context.depth_camera,
             scene_context.rgb_camera,
             scene_context.debug_camera,
-            objects,
+            visible_objects,
             args.width,
             args.height,
             settings,
@@ -1596,11 +1983,10 @@ def build_sample(
             simulation_video_file=simulation_video_file,
         )
         if args.record_simulation_video and simulation_video_file:
-            video_frame_end = max(total_frames, int(bpy.context.scene.frame_current), recorder.last_recorded_frame)
             render_simulation_video(
                 sample_dir / simulation_video_file,
                 scene_context.debug_camera,
-                objects,
+                visible_objects,
                 recorder=recorder,
                 frame_end=video_frame_end,
                 frame_step=args.simulation_video_frame_step,
@@ -1634,7 +2020,7 @@ def main() -> None:
     synthetic_log(
         f"[synthetic] config: samples={args.samples}, objects={args.objects}, "
         f"resolution={args.width}x{args.height}, collision_shape={args.collision_shape}, "
-        f"spawn_settle_frames={args.spawn_settle_frames}, simulation_frames={total_frames}"
+        f"spawn_mode={args.spawn_mode}, simulation_frames={total_frames}"
     )
 
     accepted = 0
@@ -1671,8 +2057,12 @@ def main() -> None:
         "drop_height": args.drop_height,
         "drop_height_min": args.drop_height_min,
         "drop_height_max": args.drop_height_max,
+        "drop_clearance_min": args.drop_clearance_min,
+        "drop_clearance_max": args.drop_clearance_max,
         "spawn_strategy": args.spawn_strategy,
-        "spawn_mode": "delayed_rigid_body_activation" if args.spawn_settle_frames > 0 else "batch_active",
+        "spawn_mode": args.spawn_mode,
+        "progressive_settle_frames": args.progressive_settle_frames,
+        "final_relax_frames": args.final_relax_frames,
         "objects_per_layer": args.objects_per_layer,
         "spawn_min_distance": args.spawn_min_distance,
         "spawn_settle_frames": args.spawn_settle_frames,
@@ -1702,13 +2092,14 @@ def main() -> None:
         "out_of_bin_tolerance": args.out_of_bin_tolerance,
         "allow_out_of_bin_filtering": args.allow_out_of_bin_filtering,
         "out_of_bin_policy": "filter" if args.allow_out_of_bin_filtering else "reject_attempt",
-        "out_of_bin_check": "world_bbox_xy",
+        "out_of_bin_check": "world_center_xy",
         "min_visible_objects": args.min_visible_objects,
         "min_visible_points": args.min_visible_points,
         "max_sample_attempts": args.max_sample_attempts,
         "settle_frames": args.settle_frames,
         "simulation_frames": total_frames,
         "record_simulation_video": args.record_simulation_video,
+        "record_failed_video": args.record_failed_video,
         "simulation_video_name": args.simulation_video_name,
         "simulation_video_frame_step": args.simulation_video_frame_step,
         "simulation_video_fps": args.simulation_video_fps,

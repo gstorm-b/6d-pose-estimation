@@ -75,17 +75,19 @@ In the Generation group:
 
 ### Option B: CLI Preset For bending_pipe
 
-The current stable bending_pipe preset is:
+The current recommended bending_pipe preset uses progressive spawn mode and scales to 30 objects:
 
 ```text
-configs/generator/bending_pipe_active_spawn_stable.json
+configs/generator/bending_pipe_progressive.json
 ```
 
 Run Blender:
 
 ```powershell
-& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --settings-file .\configs\generator\bending_pipe_active_spawn_stable.json --output .\synthetic-data\bending_pipe_new
+& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --settings-file .\configs\generator\bending_pipe_progressive.json --output .\synthetic-data\bending_pipe_new
 ```
+
+The older `configs/generator/bending_pipe_active_spawn_stable.json` is kept as a delayed-mode reference. Progressive mode drops one object at a time onto the pile, so 30 long parts no longer roll out of the bin. Add `--record-failed-video` while tuning to capture an MP4 of any rejected attempt under `<output>/rejected/`.
 
 ### Option C: CLI Example For K41144
 
@@ -97,9 +99,11 @@ Run Blender:
 
 Generation notes:
 
-- `--spawn-settle-frames > 0` uses delayed rigid-body activation. Pending objects wait parked far outside the bin (disabled rigid bodies remain static colliders in Bullet) and are keyframe-teleported to their drop position 3 frames before activation, so a newly activated object can never interpenetrate an invisible pending neighbor.
-- When spawns coexist (batch mode `--spawn-settle-frames 0`, or spawn frames closer than 12 frames apart), drop positions enforce a hard 3D separation of `2 * bounding_radius + max(collision_margin, 0.0005)` and lift candidates upward instead of overlapping.
+- `--spawn-mode progressive` (default) drops one object at a time from `pile_top + bounding_radius + drop_clearance`, settles it, freezes it as a passive collider, then drops the next, followed by a final all-active relaxation. This is the PyBullet-style mode and produces the fewest out-of-bin ejections. Tune with `--drop-clearance-min/--drop-clearance-max`, `--progressive-settle-frames`, `--final-relax-frames`.
+- `--spawn-mode delayed` is the legacy parked delayed-activation path (uses `--drop-height-min/max`, `--spawn-settle-frames`). `--spawn-mode batch` activates all objects at frame 1. Both enforce a hard 3D spawn separation of `2 * bounding_radius + max(collision_margin, 0.0005)`.
+- Out-of-bin is center-based (`world_center_xy`): a long part leaning on the wall with its center inside the bin is accepted; only a center outside the bin or a part dropping through the floor is rejected.
 - A physics explosion watchdog rejects an attempt early with `reason="physics_explosion"` when any activated object exceeds the speed limit (`--explosion-speed-limit`, automatic by default, `0` disables) or leaves the vertical sanity band.
+- `--record-failed-video` renders an MP4 of every rejected attempt into `<output>/rejected/sample_XXXXXX_attempt_YY_<reason>.mp4` for failure investigation.
 - Physics defaults since 2026-06-10: `collision_margin 0.0005`, `physics_substeps 60`, `object_linear_damping 0.05`, `object_angular_damping 0.15`. See `docs/generator-physics-and-production-readiness-review.md` for the verified root cause behind these values.
 - Simulation preview videos use the debug camera parameters: `--debug-camera-location`, `--debug-camera-target`, and `--debug-camera-lens`.
 - For parameter tuning, add `--samples 1 --record-simulation-video --simulation-video-frame-step 1` and inspect `sample_000000/spawn_simulation.mp4`. The preview uses a bright temporary material and hides bin walls only during video render, after raw RGB/depth/mask/metadata have already been written.

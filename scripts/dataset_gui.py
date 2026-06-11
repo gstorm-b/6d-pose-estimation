@@ -503,8 +503,18 @@ class DatasetGui(QMainWindow):
         self.bin_x_spin = self._double_spin(0.01, 5.0, 0.24, 3, 0.01)
         self.bin_y_spin = self._double_spin(0.01, 5.0, 0.24, 3, 0.01)
         self.bin_wall_height_spin = self._double_spin(0.01, 5.0, 0.14, 3, 0.01)
+        self.drop_clearance_min_spin = self._double_spin(0.001, 2.0, 0.03, 3, 0.01)
+        self.drop_clearance_min_spin.setToolTip("Progressive mode: minimum drop height above the current pile top, in meters.")
+        self.drop_clearance_max_spin = self._double_spin(0.001, 2.0, 0.12, 3, 0.01)
+        self.drop_clearance_max_spin.setToolTip("Progressive mode: maximum drop height above the current pile top, in meters.")
+        self.progressive_settle_frames_spin = self._spin(1, 5000, 45)
+        self.progressive_settle_frames_spin.setToolTip("Progressive mode: frames each object falls and settles before being frozen.")
+        self.final_relax_frames_spin = self._spin(0, 5000, 60)
+        self.final_relax_frames_spin.setToolTip("Progressive mode: final all-active relaxation frames so the pile self-adjusts.")
         self.drop_height_min_spin = self._double_spin(0.001, 5.0, 0.12, 3, 0.01)
+        self.drop_height_min_spin.setToolTip("delayed/batch modes only: minimum absolute drop height.")
         self.drop_height_max_spin = self._double_spin(0.001, 5.0, 0.34, 3, 0.01)
+        self.drop_height_max_spin.setToolTip("delayed/batch modes only: maximum absolute drop height.")
         self.objects_per_layer_spin = self._spin(1, 100, 6)
         self.spawn_min_distance_spin = self._double_spin(0.0, 1.0, 0.045, 3, 0.005)
         self.collision_margin_spin = self._double_spin(0.0, 0.1, 0.0005, 6, 0.0001)
@@ -524,10 +534,19 @@ class DatasetGui(QMainWindow):
         self.record_video_check = QCheckBox("Record simulation video")
         self.record_video_check.setChecked(False)
         self.record_video_check.setToolTip("Write an MP4 preview of the accepted sample's drop/settle animation.")
+        self.record_failed_video_check = QCheckBox("Record failed-attempt video")
+        self.record_failed_video_check.setChecked(False)
+        self.record_failed_video_check.setToolTip("Also write an MP4 of each rejected attempt into <output>/rejected/ for failure investigation.")
         self.video_frame_step_spin = self._spin(1, 240, 4)
         self.video_frame_step_spin.setToolTip("Render every Nth simulation frame to keep preview videos fast.")
         self.video_fps_spin = self._spin(1, 120, 24)
 
+        self.spawn_mode_combo = QComboBox()
+        self.spawn_mode_combo.addItems(["progressive", "delayed", "batch"])
+        self.spawn_mode_combo.setToolTip(
+            "progressive: drop one object at a time onto the pile (fewest out-of-bin ejections). "
+            "delayed/batch: legacy modes using absolute drop heights and spawn settle frames."
+        )
         self.spawn_strategy_combo = QComboBox()
         self.spawn_strategy_combo.addItems(["layered", "random"])
         self.collision_shape_combo = QComboBox()
@@ -558,12 +577,17 @@ class DatasetGui(QMainWindow):
         form.addRow("Bin X", self.bin_x_spin)
         form.addRow("Bin Y", self.bin_y_spin)
         form.addRow("Wall height", self.bin_wall_height_spin)
-        form.addRow("Drop min", self.drop_height_min_spin)
-        form.addRow("Drop max", self.drop_height_max_spin)
+        form.addRow("Spawn mode", self.spawn_mode_combo)
+        form.addRow("Drop clearance min", self.drop_clearance_min_spin)
+        form.addRow("Drop clearance max", self.drop_clearance_max_spin)
+        form.addRow("Progressive settle frames", self.progressive_settle_frames_spin)
+        form.addRow("Final relax frames", self.final_relax_frames_spin)
+        form.addRow("Drop min (legacy)", self.drop_height_min_spin)
+        form.addRow("Drop max (legacy)", self.drop_height_max_spin)
         form.addRow("Spawn", self.spawn_strategy_combo)
         form.addRow("Objects/layer", self.objects_per_layer_spin)
         form.addRow("Spawn min dist", self.spawn_min_distance_spin)
-        form.addRow("Spawn settle frames", self.spawn_settle_frames_spin)
+        form.addRow("Spawn settle frames (legacy)", self.spawn_settle_frames_spin)
         form.addRow("Collision margin", self.collision_margin_spin)
         form.addRow("Collision shape", self.collision_shape_combo)
         form.addRow("Object bounce", self.object_restitution_spin)
@@ -572,8 +596,9 @@ class DatasetGui(QMainWindow):
         form.addRow("Min visible objects", self.min_visible_objects_spin)
         form.addRow("Min visible points", self.min_visible_points_spin)
         form.addRow("Max attempts", self.max_sample_attempts_spin)
-        form.addRow("Settle frames", self.settle_frames_spin)
+        form.addRow("Settle frames (legacy)", self.settle_frames_spin)
         form.addRow("Video", self.record_video_check)
+        form.addRow("Failed video", self.record_failed_video_check)
         form.addRow("Video frame step", self.video_frame_step_spin)
         form.addRow("Video FPS", self.video_fps_spin)
         form.addRow("Out-of-bin", self.allow_out_of_bin_filtering_check)
@@ -869,6 +894,11 @@ class DatasetGui(QMainWindow):
             "bin_x": self.bin_x_spin.value(),
             "bin_y": self.bin_y_spin.value(),
             "bin_wall_height": self.bin_wall_height_spin.value(),
+            "spawn_mode": self.spawn_mode_combo.currentText(),
+            "drop_clearance_min": self.drop_clearance_min_spin.value(),
+            "drop_clearance_max": self.drop_clearance_max_spin.value(),
+            "progressive_settle_frames": self.progressive_settle_frames_spin.value(),
+            "final_relax_frames": self.final_relax_frames_spin.value(),
             "drop_height_min": self.drop_height_min_spin.value(),
             "drop_height_max": self.drop_height_max_spin.value(),
             "spawn_strategy": self.spawn_strategy_combo.currentText(),
@@ -885,6 +915,7 @@ class DatasetGui(QMainWindow):
             "max_sample_attempts": self.max_sample_attempts_spin.value(),
             "settle_frames": self.settle_frames_spin.value(),
             "record_simulation_video": self.record_video_check.isChecked(),
+            "record_failed_video": self.record_failed_video_check.isChecked(),
             "simulation_video_frame_step": self.video_frame_step_spin.value(),
             "simulation_video_fps": self.video_fps_spin.value(),
             "allow_out_of_bin_filtering": self.allow_out_of_bin_filtering_check.isChecked(),
@@ -903,6 +934,8 @@ class DatasetGui(QMainWindow):
             "height": self.height_spin,
             "objects_per_layer": self.objects_per_layer_spin,
             "spawn_settle_frames": self.spawn_settle_frames_spin,
+            "progressive_settle_frames": self.progressive_settle_frames_spin,
+            "final_relax_frames": self.final_relax_frames_spin,
             "min_visible_objects": self.min_visible_objects_spin,
             "min_visible_points": self.min_visible_points_spin,
             "max_sample_attempts": self.max_sample_attempts_spin,
@@ -920,6 +953,8 @@ class DatasetGui(QMainWindow):
             "bin_x": self.bin_x_spin,
             "bin_y": self.bin_y_spin,
             "bin_wall_height": self.bin_wall_height_spin,
+            "drop_clearance_min": self.drop_clearance_min_spin,
+            "drop_clearance_max": self.drop_clearance_max_spin,
             "drop_height_min": self.drop_height_min_spin,
             "drop_height_max": self.drop_height_max_spin,
             "spawn_min_distance": self.spawn_min_distance_spin,
@@ -950,6 +985,8 @@ class DatasetGui(QMainWindow):
         for key, spins in xyz_spins.items():
             if key in settings and settings[key] is not None:
                 self._set_xyz_values(spins, settings[key])
+        if "spawn_mode" in settings:
+            self.spawn_mode_combo.setCurrentText(str(settings["spawn_mode"]))
         if "spawn_strategy" in settings:
             self.spawn_strategy_combo.setCurrentText(str(settings["spawn_strategy"]))
         if "collision_shape" in settings:
@@ -958,6 +995,8 @@ class DatasetGui(QMainWindow):
             self.allow_out_of_bin_filtering_check.setChecked(bool(settings["allow_out_of_bin_filtering"]))
         if "record_simulation_video" in settings:
             self.record_video_check.setChecked(bool(settings["record_simulation_video"]))
+        if "record_failed_video" in settings:
+            self.record_failed_video_check.setChecked(bool(settings["record_failed_video"]))
 
     def import_generation_settings(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import generator preset", str(PROJECT_ROOT), "JSON files (*.json);;All files (*)")
@@ -1310,6 +1349,8 @@ class DatasetGui(QMainWindow):
         self.process.start()
 
     def estimated_simulation_frames(self) -> int:
+        if self.spawn_mode_combo.currentText() == "progressive":
+            return self.objects_spin.value() * max(1, self.progressive_settle_frames_spin.value()) + max(0, self.final_relax_frames_spin.value())
         spawn_settle_frames = self.spawn_settle_frames_spin.value()
         if spawn_settle_frames <= 0:
             return self.settle_frames_spin.value()
@@ -1348,6 +1389,16 @@ class DatasetGui(QMainWindow):
             str(self.bin_y_spin.value()),
             "--bin-wall-height",
             str(self.bin_wall_height_spin.value()),
+            "--spawn-mode",
+            self.spawn_mode_combo.currentText(),
+            "--drop-clearance-min",
+            str(self.drop_clearance_min_spin.value()),
+            "--drop-clearance-max",
+            str(self.drop_clearance_max_spin.value()),
+            "--progressive-settle-frames",
+            str(self.progressive_settle_frames_spin.value()),
+            "--final-relax-frames",
+            str(self.final_relax_frames_spin.value()),
             "--drop-height-min",
             str(self.drop_height_min_spin.value()),
             "--drop-height-max",
@@ -1396,6 +1447,9 @@ class DatasetGui(QMainWindow):
             args.extend(["--class-name", class_name])
         if self.record_video_check.isChecked() or force_record_video:
             args.append("--record-simulation-video")
+        if self.record_failed_video_check.isChecked():
+            args.append("--record-failed-video")
+        if self.record_video_check.isChecked() or force_record_video or self.record_failed_video_check.isChecked():
             video_frame_step = override_video_frame_step if override_video_frame_step is not None else self.video_frame_step_spin.value()
             args.extend(["--simulation-video-frame-step", str(video_frame_step)])
             args.extend(["--simulation-video-fps", str(self.video_fps_spin.value())])

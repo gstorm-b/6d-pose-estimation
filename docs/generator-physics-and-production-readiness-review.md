@@ -44,6 +44,41 @@ Edge notes preserved from the review: `object_spawn_edge_margin` still caps at `
 - `--samples 1 --record-simulation-video --simulation-video-frame-step 1` per object to inspect drops visually.
 - Small smoke datasets in delayed mode and batch mode; expect zero `physics_explosion` and zero `out_of_bin` rejections, then `scripts/validate_raw_dataset.py` must pass.
 
+### Follow-up: Progressive (PyBullet-Style) Spawn Mode (2026-06-11)
+
+After the A+B+C+D fix, a 30-object `bending_pipe` run (drop 0.2-0.8 m, bin 0.42x0.32x0.2) still failed repeatedly with `out_of_bin` (no `physics_explosion`): objects rolled over the shallow wall at sub-watchdog speed because every pending object was teleported to a fixed 0.2-0.8 m height regardless of pile height, and the strict any-object-out reject made 8/8 attempts fail.
+
+The user asked whether Blender can spawn objects one at a time during simulation like PyBullet. Blender has no `stepSimulation()`+`addBody()`, but a headless probe (`%TEMP%\blender_min_probe.py`) verified the equivalent **progressive baking**: settle one active object, freeze it as a PASSIVE collider at its settled pose (re-bake drift measured 0.000 mm), drop the next object just above the pile top, re-bake; a final all-active relaxation lets the pile self-adjust.
+
+Implemented as `--spawn-mode progressive` (now the default; `delayed` and `batch` keep the legacy behavior):
+
+- Each object is dropped from `pile_top + random(drop_clearance_min, drop_clearance_max)`, so impact energy stays low and objects rarely roll out. New flags `--drop-clearance-min/--drop-clearance-max` (default 0.03/0.12 m), `--progressive-settle-frames` (45), `--final-relax-frames` (60).
+- Only one active rigid body per stage, so there are no mid-air collisions and the dynamics stay cheap; settled objects become static colliders.
+- The explosion watchdog runs per stage; its speed limit derives from the drop clearance, not the absolute pile height.
+- Critical implementation detail: baked rigid-body results live on the **evaluated** object, not the basis `matrix_world`. Freezing, the watchdog, the settled-pose log, and the video recorder all read `obj.evaluated_get(depsgraph).matrix_world`; reading the basis returns the spawn pose and the object appears not to fall.
+- Drop height must include the bounding radius: the mesh is recentered on its bbox center, so the origin is dropped at `pile_top + bounding_radius + clearance`; otherwise a large part (bending_pipe radius 68.7 mm) spawns interpenetrating the floor and the watchdog ejects it.
+
+Failure investigation: `--record-failed-video` writes an MP4 of every rejected attempt into `<output>/rejected/sample_XXXXXX_attempt_YY_<reason>.mp4`, so out-of-bin/explosion causes can be inspected visually.
+
+### Center-Based Out-Of-Bin Policy (2026-06-11)
+
+With progressive baking, 30-object bending_pipe physics was correct (all 30 fall, settle, no explosion, no ejection), but the sample was still rejected. Diagnostics (`out_of_bin_detail` in the rejection stats) showed the rejected objects had their **center inside the bin** while their bbox merely poked past the wall by 1.9-20.2 mm: a long part lying at an angle and leaning on the wall. The old bbox-based check (in both `find_out_of_bin_objects` and the validator `_check_out_of_bin`) treated that as out of bin.
+
+Policy changed to **center-based** (`out_of_bin_check: world_center_xy`): an object is out of bin only when its recentered bbox center leaves the bin footprint (plus `out_of_bin_tolerance`), or its lowest point drops through the floor. A long part poking past the wall while centered inside is a valid bin pose for bin-picking. The generator and validator use the same rule, so existing K41144 (77/77) and bending_pipe (30/30) datasets still validate, and the verified 30-object progressive bending_pipe sample passes with 0 out-of-bin.
+
+### Progressive Mode Validation (2026-06-11)
+
+```text
+30-object bending_pipe, bin 0.42x0.32x0.2, progressive, drop-clearance 0.02-0.06,
+progressive-settle 35, final-relax 60:
+  accepted attempt 1, 0 rejected, 30/30 objects in bin, 14063 visible points, validation OK
+6-object K41144 progressive + success video: continuous 251-frame timeline, video written
+6-object K41144 legacy delayed mode: still works, validation OK
+Existing datasets re-validated with center-based rule: K41144 77/77 OK, bending_pipe 30/30 OK
+```
+
+Verified preset: `configs/generator/bending_pipe_progressive.json`. The older `bending_pipe_active_spawn_stable.json` is kept as a delayed-mode reference.
+
 ## Part 2: Production Readiness Review
 
 ### Verdict
