@@ -185,6 +185,29 @@ class ObjectPhysicsSettings:
     collision_shape: str
 
 
+@dataclass
+class ObjectAppearance:
+    """Material parameters for the spawned object copies."""
+
+    color_rgb: tuple[float, float, float]
+    metallic: float
+    roughness: float
+
+
+@dataclass
+class RenderSettings:
+    """Camera optics and Cycles/color-management settings shared by all cameras."""
+
+    sensor_width: float
+    clip_start: float
+    clip_end: float
+    cycles_samples: int
+    view_transform: str
+    view_look: str
+    view_exposure: float
+    view_gamma: float
+
+
 def evaluated_translation(obj: bpy.types.Object) -> Vector:
     """World-space origin of an object after rigid-body evaluation.
 
@@ -366,6 +389,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--physics-solver-iterations", type=int, default=30, help="Rigid-body constraint solver iterations per substep.")
     parser.add_argument(
+        "--object-friction",
+        type=float,
+        default=0.85,
+        help="Rigid-body friction for spawned objects. Lower values let objects slide into gaps for a denser pile.",
+    )
+    parser.add_argument("--bin-friction", type=float, default=0.9, help="Rigid-body friction for the bin floor and walls.")
+    parser.add_argument("--bin-restitution", type=float, default=0.05, help="Rigid-body restitution (bounce) for the bin floor and walls.")
+    parser.add_argument("--gravity", type=float, default=-9.81, help="World gravity along z in m/s^2.")
+    parser.add_argument(
+        "--out-of-bin-min-z",
+        type=float,
+        default=-0.04,
+        help="Lowest world z an object may reach before it counts as having dropped through the floor.",
+    )
+    parser.add_argument("--bin-floor-thickness", type=float, default=0.01, help="Bin floor thickness in meters.")
+    parser.add_argument("--bin-wall-thickness", type=float, default=0.012, help="Bin wall thickness in meters.")
+    parser.add_argument("--camera-sensor-width", type=float, default=32.0, help="Camera sensor width in mm for all cameras.")
+    parser.add_argument("--camera-clip-start", type=float, default=0.01, help="Camera near clip distance in meters.")
+    parser.add_argument("--camera-clip-end", type=float, default=1.50, help="Camera far clip distance in meters.")
+    parser.add_argument("--cycles-samples", type=int, default=48, help="Cycles render samples for rgb.png.")
+    parser.add_argument("--view-transform", default="Filmic", help="Color management view transform, e.g. Filmic, Standard, AgX.")
+    parser.add_argument("--view-look", default="Medium High Contrast", help="Color management look, e.g. None, Medium High Contrast.")
+    parser.add_argument("--view-exposure", type=float, default=-1.2, help="Color management exposure.")
+    parser.add_argument("--view-gamma", type=float, default=1.0, help="Color management gamma.")
+    parser.add_argument("--object-color", type=float, nargs=3, default=(0.015, 0.014, 0.013), help="Object base color RGB in 0..1.")
+    parser.add_argument("--object-metallic", type=float, default=0.85, help="Object material metallic in 0..1.")
+    parser.add_argument("--object-roughness", type=float, default=0.85, help="Object material roughness in 0..1.")
+    parser.add_argument("--bin-color", type=float, nargs=3, default=(0.12, 0.12, 0.115), help="Bin base color RGB in 0..1.")
+    parser.add_argument("--bin-roughness", type=float, default=0.82, help="Bin material roughness in 0..1.")
+    parser.add_argument("--light-type", choices=("AREA", "SUN", "POINT", "SPOT"), default="AREA", help="Light type for the scene light.")
+    parser.add_argument("--world-color", type=float, nargs=3, default=(0.018, 0.018, 0.02), help="World background color RGB in 0..1.")
+    parser.add_argument(
         "--explosion-speed-limit",
         type=float,
         default=None,
@@ -538,6 +593,8 @@ def add_box(
     scale: tuple[float, float, float],
     material: bpy.types.Material,
     collision_margin: float,
+    friction: float,
+    restitution: float,
 ) -> bpy.types.Object:
     bpy.ops.mesh.primitive_cube_add(size=1.0, location=location)
     obj = bpy.context.object
@@ -548,23 +605,34 @@ def add_box(
     bpy.ops.rigidbody.object_add()
     obj.rigid_body.type = "PASSIVE"
     obj.rigid_body.collision_shape = "BOX"
-    obj.rigid_body.friction = 0.9
-    obj.rigid_body.restitution = 0.05
+    obj.rigid_body.friction = friction
+    obj.rigid_body.restitution = restitution
     configure_rigid_body_margin(obj, collision_margin)
     obj.select_set(False)
     return obj
 
 
-def create_bin(bin_x: float, bin_y: float, wall_h: float, collision_margin: float) -> list[bpy.types.Object]:
-    mat = make_material("mat_bin_dark_gray", (0.12, 0.12, 0.115, 1.0), roughness=0.82)
-    floor_t = 0.01
-    wall_t = 0.012
+def create_bin(
+    bin_x: float,
+    bin_y: float,
+    wall_h: float,
+    collision_margin: float,
+    floor_thickness: float,
+    wall_thickness: float,
+    color_rgb: tuple[float, float, float],
+    roughness: float,
+    friction: float,
+    restitution: float,
+) -> list[bpy.types.Object]:
+    mat = make_material("mat_bin_dark_gray", (color_rgb[0], color_rgb[1], color_rgb[2], 1.0), roughness=roughness)
+    floor_t = floor_thickness
+    wall_t = wall_thickness
     parts = [
-        add_box("bin_floor", (0.0, 0.0, -floor_t / 2.0), (bin_x, bin_y, floor_t), mat, collision_margin),
-        add_box("bin_wall_pos_y", (0.0, bin_y / 2.0 + wall_t / 2.0, wall_h / 2.0), (bin_x + 2 * wall_t, wall_t, wall_h), mat, collision_margin),
-        add_box("bin_wall_neg_y", (0.0, -bin_y / 2.0 - wall_t / 2.0, wall_h / 2.0), (bin_x + 2 * wall_t, wall_t, wall_h), mat, collision_margin),
-        add_box("bin_wall_pos_x", (bin_x / 2.0 + wall_t / 2.0, 0.0, wall_h / 2.0), (wall_t, bin_y, wall_h), mat, collision_margin),
-        add_box("bin_wall_neg_x", (-bin_x / 2.0 - wall_t / 2.0, 0.0, wall_h / 2.0), (wall_t, bin_y, wall_h), mat, collision_margin),
+        add_box("bin_floor", (0.0, 0.0, -floor_t / 2.0), (bin_x, bin_y, floor_t), mat, collision_margin, friction, restitution),
+        add_box("bin_wall_pos_y", (0.0, bin_y / 2.0 + wall_t / 2.0, wall_h / 2.0), (bin_x + 2 * wall_t, wall_t, wall_h), mat, collision_margin, friction, restitution),
+        add_box("bin_wall_neg_y", (0.0, -bin_y / 2.0 - wall_t / 2.0, wall_h / 2.0), (bin_x + 2 * wall_t, wall_t, wall_h), mat, collision_margin, friction, restitution),
+        add_box("bin_wall_pos_x", (bin_x / 2.0 + wall_t / 2.0, 0.0, wall_h / 2.0), (wall_t, bin_y, wall_h), mat, collision_margin, friction, restitution),
+        add_box("bin_wall_neg_x", (-bin_x / 2.0 - wall_t / 2.0, 0.0, wall_h / 2.0), (wall_t, bin_y, wall_h), mat, collision_margin, friction, restitution),
     ]
     return parts
 
@@ -741,11 +809,17 @@ def configure_delayed_rigid_body_activation(obj: bpy.types.Object, spawn_frame: 
         set_animation_interpolation(obj.animation_data.action, location_interpolation="CONSTANT")
 
 
-def apply_object_material(template: bpy.types.Object, class_name: str) -> str:
-    """Assign the shared black-metal material to the template and return its safe name."""
+def apply_object_material(template: bpy.types.Object, class_name: str, appearance: ObjectAppearance) -> str:
+    """Assign the configured material to the template and return its safe name."""
 
     safe_name = sanitize_blender_name(class_name)
-    mat = make_material(f"mat_{safe_name}_black_metal", (0.015, 0.014, 0.013, 1.0), metallic=0.85, roughness=0.85)
+    color = appearance.color_rgb
+    mat = make_material(
+        f"mat_{safe_name}_object",
+        (color[0], color[1], color[2], 1.0),
+        metallic=appearance.metallic,
+        roughness=appearance.roughness,
+    )
     template.data.materials.clear()
     template.data.materials.append(mat)
     return safe_name
@@ -857,8 +931,10 @@ def simulate_progressive(
     progressive_settle_frames: int,
     final_relax_frames: int,
     physics: ObjectPhysicsSettings,
+    appearance: ObjectAppearance,
     substeps: int,
     solver_iterations: int,
+    gravity_z: float,
     watchdog_speed_limit: float,
     out_of_bin_min_z: float,
     freeze_settled: bool = True,
@@ -876,7 +952,7 @@ def simulate_progressive(
     which avoids objects being frozen mid-fall and left floating, at higher cost.
     """
 
-    safe_name = apply_object_material(template, class_name)
+    safe_name = apply_object_material(template, class_name, appearance)
     margin = object_spawn_edge_margin(template, bin_x, bin_y, physics.collision_margin)
     radius = object_bounding_radius(template)
     x_min = -bin_x / 2.0 + margin
@@ -912,7 +988,7 @@ def simulate_progressive(
         if recorder is not None:
             recorder.register_object(obj, spawn_frame=global_frame)
 
-        bake_physics_window(window, substeps, solver_iterations)
+        bake_physics_window(window, substeps, solver_iterations, gravity_z)
         watchdog = PhysicsExplosionWatchdog(
             enabled=watchdog_speed_limit > 0.0,
             speed_limit_m_s=watchdog_speed_limit,
@@ -961,7 +1037,7 @@ def simulate_progressive(
             obj.animation_data_clear()
             if obj.rigid_body is not None:
                 obj.rigid_body.type = "ACTIVE"
-        bake_physics_window(relax_frames, substeps, solver_iterations)
+        bake_physics_window(relax_frames, substeps, solver_iterations, gravity_z)
         relax_watchdog = PhysicsExplosionWatchdog(
             enabled=watchdog_speed_limit > 0.0,
             speed_limit_m_s=watchdog_speed_limit,
@@ -1001,9 +1077,10 @@ def create_object_instances(
     spawn_min_distance: float,
     spawn_settle_frames: int,
     physics: ObjectPhysicsSettings,
+    appearance: ObjectAppearance,
     recorder: SimulationVideoRecorder | None = None,
 ) -> list[bpy.types.Object]:
-    safe_name = apply_object_material(template, class_name)
+    safe_name = apply_object_material(template, class_name, appearance)
 
     objects = []
     spawn_xy_by_layer: dict[int, list[tuple[float, float]]] = {}
@@ -1113,48 +1190,61 @@ def setup_camera(
     location: tuple[float, float, float],
     target: tuple[float, float, float],
     lens: float,
+    render: "RenderSettings",
 ) -> bpy.types.Object:
     bpy.ops.object.camera_add(location=location)
     camera = bpy.context.object
     camera.name = name
     look_at(camera, Vector(target))
     camera.data.lens = lens
-    camera.data.sensor_width = 32.0
-    camera.data.clip_start = 0.01
-    camera.data.clip_end = 1.50
-    setup_render_settings(width, height)
+    camera.data.sensor_width = render.sensor_width
+    camera.data.clip_start = render.clip_start
+    camera.data.clip_end = render.clip_end
+    setup_render_settings(width, height, render)
     return camera
 
 
-def setup_render_settings(width: int, height: int) -> None:
+def setup_render_settings(width: int, height: int, render: "RenderSettings") -> None:
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
-    scene.cycles.samples = 48
+    scene.cycles.samples = max(1, int(render.cycles_samples))
     scene.cycles.use_denoising = True
-    scene.view_settings.view_transform = "Filmic"
-    scene.view_settings.look = "Medium High Contrast"
-    scene.view_settings.exposure = -1.2
-    scene.view_settings.gamma = 1.0
+    scene.view_settings.view_transform = render.view_transform
+    scene.view_settings.look = render.view_look
+    scene.view_settings.exposure = render.view_exposure
+    scene.view_settings.gamma = render.view_gamma
     scene.render.resolution_x = width
     scene.render.resolution_y = height
     scene.render.film_transparent = False
 
 
-def setup_lighting(location: tuple[float, float, float], energy: float, size: float) -> None:
-    bpy.ops.object.light_add(type="AREA", location=location)
+def setup_lighting(
+    location: tuple[float, float, float],
+    energy: float,
+    size: float,
+    light_type: str,
+    world_color: tuple[float, float, float],
+) -> None:
+    bpy.ops.object.light_add(type=light_type, location=location)
     light = bpy.context.object
     light.name = "large_softbox"
     light.data.energy = energy
-    light.data.size = size
+    if hasattr(light.data, "size"):
+        light.data.size = size
 
-    bpy.context.scene.world.color = (0.018, 0.018, 0.02)
+    bpy.context.scene.world.color = (world_color[0], world_color[1], world_color[2])
 
 
-def configure_physics(frame_end: int = 260, substeps_per_frame: int = 60, solver_iterations: int = 30) -> None:
+def configure_physics(
+    frame_end: int = 260,
+    substeps_per_frame: int = 60,
+    solver_iterations: int = 30,
+    gravity_z: float = -9.81,
+) -> None:
     scene = bpy.context.scene
     scene.frame_start = 1
     scene.frame_end = frame_end
-    scene.gravity = (0.0, 0.0, -9.81)
+    scene.gravity = (0.0, 0.0, gravity_z)
     if not scene.rigidbody_world:
         bpy.ops.rigidbody.world_add()
     scene.rigidbody_world.time_scale = 1.0
@@ -1164,8 +1254,8 @@ def configure_physics(frame_end: int = 260, substeps_per_frame: int = 60, solver
     scene.rigidbody_world.point_cache.frame_end = frame_end
 
 
-def reset_physics_cache(frames: int, substeps_per_frame: int = 60, solver_iterations: int = 30) -> None:
-    configure_physics(frames, substeps_per_frame, solver_iterations)
+def reset_physics_cache(frames: int, substeps_per_frame: int = 60, solver_iterations: int = 30, gravity_z: float = -9.81) -> None:
+    configure_physics(frames, substeps_per_frame, solver_iterations, gravity_z)
     bpy.context.scene.frame_set(1)
     try:
         bpy.ops.ptcache.free_bake_all()
@@ -1173,7 +1263,7 @@ def reset_physics_cache(frames: int, substeps_per_frame: int = 60, solver_iterat
         pass
 
 
-def bake_physics_window(frames: int, substeps_per_frame: int, solver_iterations: int) -> None:
+def bake_physics_window(frames: int, substeps_per_frame: int, solver_iterations: int, gravity_z: float = -9.81) -> None:
     """Free and re-bake the rigid-body cache for a fresh [1, frames] window.
 
     Progressive baking adds one rigid body and re-bakes from frame 1 each stage.
@@ -1181,7 +1271,7 @@ def bake_physics_window(frames: int, substeps_per_frame: int, solver_iterations:
     can leave matrix_world at the spawn pose in background mode.
     """
 
-    reset_physics_cache(frames, substeps_per_frame, solver_iterations)
+    reset_physics_cache(frames, substeps_per_frame, solver_iterations, gravity_z)
     bpy.context.view_layer.update()
     try:
         bpy.ops.ptcache.bake_all(bake=True)
@@ -1744,11 +1834,44 @@ def sample_visibility_stats(sensor: dict[str, np.ndarray | dict[str, float]]) ->
     }
 
 
+def render_settings_from_args(args: argparse.Namespace) -> RenderSettings:
+    return RenderSettings(
+        sensor_width=args.camera_sensor_width,
+        clip_start=args.camera_clip_start,
+        clip_end=args.camera_clip_end,
+        cycles_samples=args.cycles_samples,
+        view_transform=args.view_transform,
+        view_look=args.view_look,
+        view_exposure=args.view_exposure,
+        view_gamma=args.view_gamma,
+    )
+
+
+def object_appearance_from_args(args: argparse.Namespace) -> ObjectAppearance:
+    return ObjectAppearance(
+        color_rgb=tuple(args.object_color),
+        metallic=args.object_metallic,
+        roughness=args.object_roughness,
+    )
+
+
 def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> GenerationScene:
     clean_scene()
-    configure_physics(args.settle_frames, args.physics_substeps, args.physics_solver_iterations)
-    create_bin(args.bin_x, args.bin_y, args.bin_wall_height, args.collision_margin)
+    configure_physics(args.settle_frames, args.physics_substeps, args.physics_solver_iterations, args.gravity)
+    create_bin(
+        args.bin_x,
+        args.bin_y,
+        args.bin_wall_height,
+        args.collision_margin,
+        args.bin_floor_thickness,
+        args.bin_wall_thickness,
+        tuple(args.bin_color),
+        args.bin_roughness,
+        args.bin_friction,
+        args.bin_restitution,
+    )
     template = import_stl(model_path, args.class_name, args.model_scale)
+    render = render_settings_from_args(args)
     depth_camera = setup_camera(
         "depth_camera",
         args.width,
@@ -1756,6 +1879,7 @@ def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> Genera
         tuple(args.depth_camera_location),
         tuple(args.depth_camera_target),
         args.depth_camera_lens,
+        render,
     )
     rgb_camera = setup_camera(
         "rgb_camera",
@@ -1764,6 +1888,7 @@ def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> Genera
         tuple(args.rgb_camera_location),
         tuple(args.rgb_camera_target),
         args.rgb_camera_lens,
+        render,
     )
     debug_camera = setup_camera(
         "debug_camera",
@@ -1772,9 +1897,10 @@ def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> Genera
         tuple(args.debug_camera_location),
         tuple(args.debug_camera_target),
         args.debug_camera_lens,
+        render,
     )
     bpy.context.scene.camera = rgb_camera
-    setup_lighting(tuple(args.light_location), args.light_energy, args.light_size)
+    setup_lighting(tuple(args.light_location), args.light_energy, args.light_size, args.light_type, tuple(args.world_color))
     return GenerationScene(
         template=template,
         depth_camera=depth_camera,
@@ -1788,11 +1914,13 @@ def simulate_attempt(
     args: argparse.Namespace,
     scene_context: GenerationScene,
     physics_settings: ObjectPhysicsSettings,
+    appearance: ObjectAppearance,
     recorder: SimulationVideoRecorder,
 ) -> tuple[list[bpy.types.Object], dict[str, Any] | None, float, int, dict[str, int]]:
     """Run the configured spawn mode and return objects, explosion, speed limit, video frame end, spawn stats."""
 
     total_frames = simulation_frame_count(args)
+    watchdog_z_min = args.out_of_bin_min_z - 0.01
     if args.spawn_mode == "progressive":
         if args.explosion_speed_limit is None:
             # Objects fall only the drop clearance above the pile, so the speed
@@ -1811,17 +1939,19 @@ def simulate_attempt(
             args.progressive_settle_frames,
             args.final_relax_frames,
             physics_settings,
+            appearance,
             args.physics_substeps,
             args.physics_solver_iterations,
+            args.gravity,
             effective_speed_limit,
-            -0.05,
+            watchdog_z_min,
             freeze_settled=args.progressive_freeze,
             recorder=recorder,
         )
         video_frame_end = max(used_frames, recorder.last_recorded_frame)
         return objects, violation, effective_speed_limit, video_frame_end, {"parked_spawns": 0, "spawn_z_lift_events": 0}
 
-    reset_physics_cache(total_frames, args.physics_substeps, args.physics_solver_iterations)
+    reset_physics_cache(total_frames, args.physics_substeps, args.physics_solver_iterations, args.gravity)
     objects = create_object_instances(
         scene_context.template,
         scene_context.class_name,
@@ -1837,6 +1967,7 @@ def simulate_attempt(
         args.spawn_min_distance,
         args.spawn_settle_frames,
         physics_settings,
+        appearance,
         recorder=recorder,
     )
     max_spawn_z = max((float(obj.get("spawn_height", 0.0)) for obj in objects), default=0.0)
@@ -1847,7 +1978,7 @@ def simulate_attempt(
     watchdog = PhysicsExplosionWatchdog(
         enabled=effective_speed_limit > 0.0,
         speed_limit_m_s=effective_speed_limit,
-        z_min_limit_m=-0.05,
+        z_min_limit_m=watchdog_z_min,
         z_max_limit_m=max_spawn_z + 0.25,
         fps=float(bpy.context.scene.render.fps),
         objects=objects,
@@ -1888,19 +2019,20 @@ def build_sample(
     )
     physics_settings = ObjectPhysicsSettings(
         mass_kg=args.object_mass,
-        friction=0.85,
+        friction=args.object_friction,
         restitution=args.object_restitution,
         linear_damping=args.object_linear_damping,
         angular_damping=args.object_angular_damping,
         collision_margin=args.collision_margin,
         collision_shape=args.collision_shape,
     )
+    appearance = object_appearance_from_args(args)
     synthetic_log(
         f"[synthetic] sample {sample_idx:06d} attempt {attempt_idx + 1}: "
         f"spawn_mode={args.spawn_mode}, objects={args.objects}, simulation_frames={total_frames}"
     )
     objects, violation, effective_speed_limit, video_frame_end, spawn_stats = simulate_attempt(
-        args, scene_context, physics_settings, recorder
+        args, scene_context, physics_settings, appearance, recorder
     )
     all_objects = objects
     parked_spawns = int(spawn_stats["parked_spawns"])
@@ -1920,7 +2052,7 @@ def build_sample(
             stats["reason"] = "physics_explosion"
             stats["explosion"] = violation
         else:
-            out_of_bin_objects = find_out_of_bin_objects(objects, args.bin_x, args.bin_y, args.out_of_bin_tolerance)
+            out_of_bin_objects = find_out_of_bin_objects(objects, args.bin_x, args.bin_y, args.out_of_bin_tolerance, args.out_of_bin_min_z)
             stats["in_bin_objects"] = len(objects) - len(out_of_bin_objects)
             stats["out_of_bin_objects"] = len(out_of_bin_objects)
             stats["out_of_bin_ids"] = [objects.index(obj) + 1 for obj in out_of_bin_objects]
@@ -1984,14 +2116,33 @@ def build_sample(
             "collision_shape": args.collision_shape,
             "object_restitution": args.object_restitution,
             "object_mass": args.object_mass,
+            "object_friction": args.object_friction,
             "object_linear_damping": args.object_linear_damping,
             "object_angular_damping": args.object_angular_damping,
+            "object_color": list(args.object_color),
+            "object_metallic": args.object_metallic,
+            "object_roughness": args.object_roughness,
+            "bin_friction": args.bin_friction,
+            "bin_restitution": args.bin_restitution,
+            "bin_floor_thickness": args.bin_floor_thickness,
+            "bin_wall_thickness": args.bin_wall_thickness,
+            "bin_color": list(args.bin_color),
+            "bin_roughness": args.bin_roughness,
+            "gravity": args.gravity,
             "physics_substeps": args.physics_substeps,
             "physics_solver_iterations": args.physics_solver_iterations,
             "explosion_speed_limit_m_s": effective_speed_limit,
             "spawn_parking_lead_frames": PARK_STATIC_LEAD_FRAMES,
             "parked_spawns": parked_spawns,
             "spawn_z_lift_events": spawn_z_lift_events,
+            "camera_sensor_width": args.camera_sensor_width,
+            "camera_clip_start": args.camera_clip_start,
+            "camera_clip_end": args.camera_clip_end,
+            "cycles_samples": args.cycles_samples,
+            "view_transform": args.view_transform,
+            "view_look": args.view_look,
+            "view_exposure": args.view_exposure,
+            "view_gamma": args.view_gamma,
             "depth_camera_location": list(args.depth_camera_location),
             "depth_camera_target": list(args.depth_camera_target),
             "depth_camera_lens": args.depth_camera_lens,
@@ -2004,7 +2155,10 @@ def build_sample(
             "light_location": list(args.light_location),
             "light_energy": args.light_energy,
             "light_size": args.light_size,
+            "light_type": args.light_type,
+            "world_color": list(args.world_color),
             "out_of_bin_tolerance": args.out_of_bin_tolerance,
+            "out_of_bin_min_z": args.out_of_bin_min_z,
             "allow_out_of_bin_filtering": args.allow_out_of_bin_filtering,
             "out_of_bin_policy": "filter" if args.allow_out_of_bin_filtering else "reject_attempt",
             "out_of_bin_check": "world_center_xy",
@@ -2067,6 +2221,10 @@ def main() -> None:
         with settings_path.open("w", encoding="utf-8") as f:
             json.dump(generator_settings_dict(args), f, indent=2)
         synthetic_log(f"[synthetic] exported generator settings: {settings_path}")
+    if args.samples <= 0:
+        # Export-only / dry-run: write the full preset without generating samples.
+        synthetic_log("[synthetic] samples <= 0, skipping generation (export-only run)")
+        return
     output_dir.mkdir(parents=True, exist_ok=True)
     scene_context = setup_generation_scene(args, model_path)
     total_frames = simulation_frame_count(args)
@@ -2125,12 +2283,31 @@ def main() -> None:
         "collision_shape": args.collision_shape,
         "object_restitution": args.object_restitution,
         "object_mass": args.object_mass,
+        "object_friction": args.object_friction,
         "object_linear_damping": args.object_linear_damping,
         "object_angular_damping": args.object_angular_damping,
+        "object_color": list(args.object_color),
+        "object_metallic": args.object_metallic,
+        "object_roughness": args.object_roughness,
+        "bin_friction": args.bin_friction,
+        "bin_restitution": args.bin_restitution,
+        "bin_floor_thickness": args.bin_floor_thickness,
+        "bin_wall_thickness": args.bin_wall_thickness,
+        "bin_color": list(args.bin_color),
+        "bin_roughness": args.bin_roughness,
+        "gravity": args.gravity,
         "physics_substeps": args.physics_substeps,
         "physics_solver_iterations": args.physics_solver_iterations,
         "explosion_speed_limit": args.explosion_speed_limit if args.explosion_speed_limit is not None else "auto",
         "spawn_parking_lead_frames": PARK_STATIC_LEAD_FRAMES,
+        "camera_sensor_width": args.camera_sensor_width,
+        "camera_clip_start": args.camera_clip_start,
+        "camera_clip_end": args.camera_clip_end,
+        "cycles_samples": args.cycles_samples,
+        "view_transform": args.view_transform,
+        "view_look": args.view_look,
+        "view_exposure": args.view_exposure,
+        "view_gamma": args.view_gamma,
         "depth_camera_location": list(args.depth_camera_location),
         "depth_camera_target": list(args.depth_camera_target),
         "depth_camera_lens": args.depth_camera_lens,
@@ -2143,7 +2320,10 @@ def main() -> None:
         "light_location": list(args.light_location),
         "light_energy": args.light_energy,
         "light_size": args.light_size,
+        "light_type": args.light_type,
+        "world_color": list(args.world_color),
         "out_of_bin_tolerance": args.out_of_bin_tolerance,
+        "out_of_bin_min_z": args.out_of_bin_min_z,
         "allow_out_of_bin_filtering": args.allow_out_of_bin_filtering,
         "out_of_bin_policy": "filter" if args.allow_out_of_bin_filtering else "reject_attempt",
         "out_of_bin_check": "world_center_xy",

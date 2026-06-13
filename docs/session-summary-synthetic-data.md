@@ -149,12 +149,23 @@ Important generator options:
 - `--collision-margin`: rigid-body margin in meters. Current recommended value is `0.0005` (0.5 mm). The old `0.00002` value was below what Bullet handles robustly and contributed to deep-penetration impulses and wall tunneling.
 - `--object-restitution`: rigid-body bounce/restitution for spawned objects. Lower values reduce rebounds.
 - `--object-mass`: rigid-body mass in kg. Default `0.08`.
+- `--object-friction`: object rigid-body friction. Default `0.85`. Lower values (try `0.2`-`0.4`) let objects slide into gaps for a denser pile.
 - `--object-linear-damping`: default `0.05`. The old hard-coded `0.35` made free fall unrealistically slow.
 - `--object-angular-damping`: default `0.15` (old hard-coded value was `0.45`).
+- `--bin-friction`, `--bin-restitution`: friction/restitution of the bin floor and walls. Defaults `0.9` / `0.05`.
+- `--gravity`: world gravity along z. Default `-9.81`.
 - `--physics-substeps`: rigid-body world substeps per frame. Default `60` (old hard-coded value was `20`); higher values reduce penetration depth and tunneling.
 - `--physics-solver-iterations`: constraint solver iterations. Default `30`.
 - `--explosion-speed-limit`: watchdog speed limit in m/s. Omit for an automatic limit `max(4.0, 1.5 * sqrt(2 g h_max))`; `0` disables the watchdog.
-- `--out-of-bin-tolerance`: tolerance around bin x/y bounds for post-physics world-bbox checks.
+- `--bin-floor-thickness`, `--bin-wall-thickness`: bin geometry in meters. Defaults `0.01` / `0.012`.
+- `--object-color`, `--object-metallic`, `--object-roughness`: object material. Defaults `(0.015,0.014,0.013)` / `0.85` / `0.85`.
+- `--bin-color`, `--bin-roughness`: bin material. Defaults `(0.12,0.12,0.115)` / `0.82`.
+- `--world-color`: world background color. Default `(0.018,0.018,0.02)`.
+- `--light-type`: `AREA` (default), `SUN`, `POINT`, or `SPOT`.
+- `--camera-sensor-width`, `--camera-clip-start`, `--camera-clip-end`: shared camera optics. Defaults `32.0` / `0.01` / `1.50`.
+- `--cycles-samples`, `--view-transform`, `--view-look`, `--view-exposure`, `--view-gamma`: Cycles render and color management. Defaults `48` / `Filmic` / `Medium High Contrast` / `-1.2` / `1.0`.
+- `--out-of-bin-tolerance`: tolerance around bin x/y bounds for the post-physics center check.
+- `--out-of-bin-min-z`: lowest world z an object may reach before it counts as dropped through the floor. Default `-0.04`.
 - `--allow-out-of-bin-filtering`: optional legacy/debug behavior that hides out-of-bin objects and accepts the remaining scene if visibility thresholds pass. Do not use it for training datasets. Default behavior is stricter: reject the whole attempt.
 - `--min-visible-objects`: reject samples with fewer visible instances.
 - `--min-visible-points`: reject samples with too few object points.

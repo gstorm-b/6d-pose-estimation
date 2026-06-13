@@ -49,3 +49,4 @@ experiments/
 # Codex/local workspace metadata
 .codex/
 .agents/
+.gui_generation_preset.json

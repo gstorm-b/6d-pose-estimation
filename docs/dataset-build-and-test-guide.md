@@ -63,39 +63,37 @@ Run:
 python .\scripts\dataset_gui.py
 ```
 
-In the Generation group:
+The GUI Generation panel is organized into collapsible-style groups: Model & Output, Cameras, Lighting & Render, Bin & Materials, Spawn & Drop, Physics & Rigid Body, Validation, Video, Actions. Every generator parameter is exposed in one of these groups.
 
-- Select `object-model/K41144.stl` or `object-model/bending_pipe.stl`.
-- Set class name to `K41144` or `bending_pipe`.
-- Set model scale to `1.0` for K41144 or `0.001` for bending_pipe.
-- Set depth camera, RGB camera, debug video camera, light, spawn, restitution, and settle-frame parameters.
-- Use `1 Sample + Video` to generate a single accepted sample with `spawn_simulation.mp4`. This mode forces video frame step 1 so object falling and settling are easier to inspect before running a full dataset.
-- Use Import Preset / Export Preset for repeatable generator settings.
+- Select `object-model/K41144.stl` or `object-model/bending_pipe.stl`, set class name and model scale (`1.0` K41144, `0.001` bending_pipe).
+- Tune any camera, lighting, render, bin, material, spawn, physics, validation, or video parameter from its group.
+- Use `1 Sample + Video` to generate a single accepted sample with `spawn_simulation.mp4` at video frame step 1 for inspection.
+- Use Import Preset / Export Preset for repeatable settings. Internally the GUI now runs the generator by writing all settings to a JSON preset and calling `--settings-file`, so a GUI run and a CLI `--settings-file` run are identical.
 - Choose a new empty output folder.
 
-### Option B: CLI Preset For bending_pipe
+### Option B: CLI Preset (single JSON input)
 
-The current recommended bending_pipe preset uses progressive spawn mode and scales to 30 objects:
+The generator's recommended input is a single JSON preset that contains every parameter. The maintained presets are:
 
 ```text
+configs/generator/k41144_progressive.json
 configs/generator/bending_pipe_progressive.json
 ```
 
-Run Blender:
+Run Blender with only the preset (and optionally an output override):
 
 ```powershell
+& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --settings-file .\configs\generator\k41144_progressive.json --output .\synthetic-data\K41144_new
 & "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --settings-file .\configs\generator\bending_pipe_progressive.json --output .\synthetic-data\bending_pipe_new
 ```
 
-The older `configs/generator/bending_pipe_active_spawn_stable.json` is kept as a delayed-mode reference. Progressive mode drops one object at a time onto the pile, so 30 long parts no longer roll out of the bin. Add `--record-failed-video` while tuning to capture an MP4 of any rejected attempt under `<output>/rejected/`.
+Any flag after `--settings-file` overrides that key, so smoke tests can shrink a preset, e.g. `--samples 1 --objects 8`. To regenerate a full preset template from current values without running a simulation, pass `--samples 0 --export-settings <path>`.
 
-### Option C: CLI Example For K41144
+The older `configs/generator/bending_pipe_active_spawn_stable.json` is kept as a delayed-mode reference. Add `--record-failed-video` while tuning to capture an MP4 of any rejected attempt under `<output>/rejected/`.
 
-Run Blender:
+### Denser piles
 
-```powershell
-& "C:\Program Files\Blender Foundation\Blender 4.5\blender.exe" --background --python .\scripts\generate_synthetic_blender.py -- --model .\object-model\K41144.stl --class-name K41144 --model-scale 1.0 --output .\synthetic-data\K41144_new --samples 80 --objects 30 --width 640 --height 480 --bin-wall-height 0.14 --drop-height-min 0.12 --drop-height-max 0.34 --spawn-strategy layered --objects-per-layer 6 --spawn-min-distance 0.045 --spawn-settle-frames 35 --collision-margin 0.0005 --object-restitution 0.01 --min-visible-objects 12 --min-visible-points 8000 --max-sample-attempts 12 --settle-frames 260
-```
+To pack objects more tightly at the bottom of the bin, lower friction so parts slide into gaps: set `object_friction` to about `0.2`-`0.4` (default `0.85`) and keep `object_restitution` low. Combine with `--no-progressive-freeze` and a higher `final_relax_frames` so the pile keeps re-settling. The maintained presets ship with `object_friction: 0.5` as a denser-than-default starting point.
 
 Generation notes:
 
