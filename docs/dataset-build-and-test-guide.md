@@ -100,6 +100,7 @@ Run Blender:
 Generation notes:
 
 - `--spawn-mode progressive` (default) drops one object at a time from `pile_top + bounding_radius + drop_clearance`, settles it, freezes it as a passive collider, then drops the next, followed by a final all-active relaxation. This is the PyBullet-style mode and produces the fewest out-of-bin ejections. Tune with `--drop-clearance-min/--drop-clearance-max`, `--progressive-settle-frames`, `--final-relax-frames`.
+- If objects look like they freeze before settling and end up floating, raise `--progressive-settle-frames`, or use `--no-progressive-freeze` to keep all objects active so the pile keeps re-settling each stage (slower but no mid-fall freezing).
 - `--spawn-mode delayed` is the legacy parked delayed-activation path (uses `--drop-height-min/max`, `--spawn-settle-frames`). `--spawn-mode batch` activates all objects at frame 1. Both enforce a hard 3D spawn separation of `2 * bounding_radius + max(collision_margin, 0.0005)`.
 - Out-of-bin is center-based (`world_center_xy`): a long part leaning on the wall with its center inside the bin is accepted; only a center outside the bin or a part dropping through the floor is rejected.
 - A physics explosion watchdog rejects an attempt early with `reason="physics_explosion"` when any activated object exceeds the speed limit (`--explosion-speed-limit`, automatic by default, `0` disables) or leaves the vertical sanity band.

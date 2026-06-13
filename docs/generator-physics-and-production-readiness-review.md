@@ -79,6 +79,10 @@ Existing datasets re-validated with center-based rule: K41144 77/77 OK, bending_
 
 Verified preset: `configs/generator/bending_pipe_progressive.json`. The older `bending_pipe_active_spawn_stable.json` is kept as a delayed-mode reference.
 
+### Progressive Freeze Toggle (2026-06-12)
+
+Freezing a settled object as a passive collider assumes it has actually settled within its window. If the window is too short, an object can be frozen mid-fall and left floating, since later objects rest on it and it never moves again. `--no-progressive-freeze` (GUI: "Freeze settled" off) keeps every dropped object ACTIVE and re-bases the whole pile to its settled pose each stage, so the pile re-settles continuously and nothing is frozen mid-fall. Cost is higher (all active bodies re-simulate per stage). Quantified on K41144 at a deliberately short 12-frame settle window with no final relax: pile top 67.1 mm with freeze on vs 57.7 mm with freeze off. Default stays freeze-on (faster); raising `--progressive-settle-frames` is the cheaper first remedy for occasional floating.
+
 ## Part 2: Production Readiness Review
 
 ### Verdict

@@ -511,6 +511,12 @@ class DatasetGui(QMainWindow):
         self.progressive_settle_frames_spin.setToolTip("Progressive mode: frames each object falls and settles before being frozen.")
         self.final_relax_frames_spin = self._spin(0, 5000, 60)
         self.final_relax_frames_spin.setToolTip("Progressive mode: final all-active relaxation frames so the pile self-adjusts.")
+        self.progressive_freeze_check = QCheckBox("Freeze settled objects (progressive)")
+        self.progressive_freeze_check.setChecked(True)
+        self.progressive_freeze_check.setToolTip(
+            "On (default): freeze each object as a static collider once settled (faster). "
+            "Off: keep settled objects active so the pile keeps re-settling (slower, avoids objects frozen mid-fall / floating)."
+        )
         self.drop_height_min_spin = self._double_spin(0.001, 5.0, 0.12, 3, 0.01)
         self.drop_height_min_spin.setToolTip("delayed/batch modes only: minimum absolute drop height.")
         self.drop_height_max_spin = self._double_spin(0.001, 5.0, 0.34, 3, 0.01)
@@ -582,6 +588,7 @@ class DatasetGui(QMainWindow):
         form.addRow("Drop clearance max", self.drop_clearance_max_spin)
         form.addRow("Progressive settle frames", self.progressive_settle_frames_spin)
         form.addRow("Final relax frames", self.final_relax_frames_spin)
+        form.addRow("Freeze settled", self.progressive_freeze_check)
         form.addRow("Drop min (legacy)", self.drop_height_min_spin)
         form.addRow("Drop max (legacy)", self.drop_height_max_spin)
         form.addRow("Spawn", self.spawn_strategy_combo)
@@ -899,6 +906,7 @@ class DatasetGui(QMainWindow):
             "drop_clearance_max": self.drop_clearance_max_spin.value(),
             "progressive_settle_frames": self.progressive_settle_frames_spin.value(),
             "final_relax_frames": self.final_relax_frames_spin.value(),
+            "progressive_freeze": self.progressive_freeze_check.isChecked(),
             "drop_height_min": self.drop_height_min_spin.value(),
             "drop_height_max": self.drop_height_max_spin.value(),
             "spawn_strategy": self.spawn_strategy_combo.currentText(),
@@ -997,6 +1005,8 @@ class DatasetGui(QMainWindow):
             self.record_video_check.setChecked(bool(settings["record_simulation_video"]))
         if "record_failed_video" in settings:
             self.record_failed_video_check.setChecked(bool(settings["record_failed_video"]))
+        if "progressive_freeze" in settings:
+            self.progressive_freeze_check.setChecked(bool(settings["progressive_freeze"]))
 
     def import_generation_settings(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import generator preset", str(PROJECT_ROOT), "JSON files (*.json);;All files (*)")
@@ -1399,6 +1409,7 @@ class DatasetGui(QMainWindow):
             str(self.progressive_settle_frames_spin.value()),
             "--final-relax-frames",
             str(self.final_relax_frames_spin.value()),
+            "--progressive-freeze" if self.progressive_freeze_check.isChecked() else "--no-progressive-freeze",
             "--drop-height-min",
             str(self.drop_height_min_spin.value()),
             "--drop-height-max",

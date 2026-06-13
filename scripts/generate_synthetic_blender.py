@@ -324,6 +324,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Progressive mode: frames of a final all-active relaxation so the pile self-adjusts.",
     )
     parser.add_argument(
+        "--progressive-freeze",
+        dest="progressive_freeze",
+        action="store_true",
+        help="Progressive mode: freeze each object as a passive collider once settled (faster).",
+    )
+    parser.add_argument(
+        "--no-progressive-freeze",
+        dest="progressive_freeze",
+        action="store_false",
+        help="Progressive mode: keep settled objects active so the pile keeps re-settling (slower, avoids floating).",
+    )
+    parser.set_defaults(progressive_freeze=True)
+    parser.add_argument(
         "--spawn-settle-frames",
         type=int,
         default=35,
@@ -804,6 +817,35 @@ def freeze_object_as_passive(obj: bpy.types.Object) -> None:
         obj.rigid_body.kinematic = False
 
 
+def rebase_active_objects_to_settled(objects: list[bpy.types.Object]) -> None:
+    """Update every object's base pose to its current settled pose, keeping it ACTIVE.
+
+    This is the no-freeze path: instead of turning settled objects into static
+    colliders, they stay dynamic so the whole pile keeps re-settling each time a
+    new object lands. That avoids objects being frozen mid-fall and left floating,
+    at the cost of re-simulating all active bodies every stage. All evaluated
+    poses are read before `frame_set(1)` resets the evaluation.
+    """
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    settled_poses = {
+        obj.name: obj.evaluated_get(depsgraph).matrix_world.copy()
+        for obj in objects
+        if obj.name in bpy.data.objects
+    }
+    bpy.context.scene.frame_set(1)
+    for obj in objects:
+        pose = settled_poses.get(obj.name)
+        if pose is None:
+            continue
+        obj.animation_data_clear()
+        obj.location = pose.to_translation()
+        obj.rotation_euler = pose.to_euler()
+        if obj.rigid_body is not None:
+            obj.rigid_body.type = "ACTIVE"
+            obj.rigid_body.kinematic = False
+
+
 def simulate_progressive(
     template: bpy.types.Object,
     class_name: str,
@@ -819,14 +861,19 @@ def simulate_progressive(
     solver_iterations: int,
     watchdog_speed_limit: float,
     out_of_bin_min_z: float,
+    freeze_settled: bool = True,
     recorder: SimulationVideoRecorder | None = None,
 ) -> tuple[list[bpy.types.Object], dict[str, Any] | None, int]:
-    """Drop objects one at a time, settling and freezing each before the next.
+    """Drop objects one at a time, settling each before the next.
 
     Returns (objects, explosion_violation_or_None, total_global_frames). Each
     object falls a short clearance above the current pile top, so impact energy
-    stays low and objects rarely roll out of the bin. Only one active body
-    simulates per stage, so there are no mid-air collisions.
+    stays low and objects rarely roll out of the bin.
+
+    When `freeze_settled` is True (default), each settled object becomes a static
+    passive collider, so only one active body simulates per stage (fast). When
+    False, settled objects stay active and the whole pile re-settles each stage,
+    which avoids objects being frozen mid-fall and left floating, at higher cost.
     """
 
     safe_name = apply_object_material(template, class_name)
@@ -894,11 +941,15 @@ def simulate_progressive(
             return objects, violation, global_frame
 
         settled_z = float(evaluated_translation(obj).z)
-        freeze_object_as_passive(obj)
+        if freeze_settled:
+            freeze_object_as_passive(obj)
+        else:
+            # Keep the whole pile dynamic so it re-settles when the next lands.
+            rebase_active_objects_to_settled(objects)
         if idx == 0 or (idx + 1) % 5 == 0 or idx + 1 == count:
             synthetic_log(
                 f"[synthetic] progressive dropped object {idx + 1}/{count} "
-                f"pile_top={top:.3f} drop_z={drop_z:.3f} settled_z={settled_z:.3f}"
+                f"pile_top={top:.3f} drop_z={drop_z:.3f} settled_z={settled_z:.3f} freeze={freeze_settled}"
             )
 
     template.hide_viewport = True
@@ -1764,6 +1815,7 @@ def simulate_attempt(
             args.physics_solver_iterations,
             effective_speed_limit,
             -0.05,
+            freeze_settled=args.progressive_freeze,
             recorder=recorder,
         )
         video_frame_end = max(used_frames, recorder.last_recorded_frame)
@@ -1923,6 +1975,7 @@ def build_sample(
             "spawn_mode": args.spawn_mode,
             "progressive_settle_frames": args.progressive_settle_frames,
             "final_relax_frames": args.final_relax_frames,
+            "progressive_freeze": args.progressive_freeze,
             "objects_per_layer": args.objects_per_layer,
             "spawn_min_distance": args.spawn_min_distance,
             "spawn_settle_frames": args.spawn_settle_frames,
@@ -2063,6 +2116,7 @@ def main() -> None:
         "spawn_mode": args.spawn_mode,
         "progressive_settle_frames": args.progressive_settle_frames,
         "final_relax_frames": args.final_relax_frames,
+        "progressive_freeze": args.progressive_freeze,
         "objects_per_layer": args.objects_per_layer,
         "spawn_min_distance": args.spawn_min_distance,
         "spawn_settle_frames": args.spawn_settle_frames,

@@ -102,6 +102,7 @@ Purpose:
 - Spawn many copies of the object.
 - Run Blender rigid-body simulation. `--spawn-mode` selects how objects enter the scene: `progressive` (default), `delayed`, or `batch`.
 - `progressive` (PyBullet-style, recommended): drop one object at a time from `pile_top + bounding_radius + random(drop_clearance_min, drop_clearance_max)`, settle it, freeze it as a passive collider at its settled pose, then drop the next; a final all-active relaxation lets the pile self-adjust. Only one active body simulates per stage, so there are no mid-air collisions and impact energy stays low, which nearly eliminates out-of-bin ejections. Baked poses are read from the evaluated object, not basis `matrix_world`.
+- Progressive freeze can be disabled with `--no-progressive-freeze`: settled objects stay ACTIVE and the whole pile re-settles each stage, so an object whose settle window was too short is never frozen mid-fall and left floating. This is slower (all active bodies re-simulate per stage) but produces tighter piles. Measured example (12 settle frames, no final relax, K41144): freeze on pile top 67.1 mm vs off 57.7 mm.
 - `delayed` (legacy `--spawn-settle-frames > 0`): each object's rigid body stays disabled until its scheduled `spawn_frame`. Pending objects wait parked far outside the bin and are keyframe-teleported to their drop position 3 frames before activation, because disabled rigid bodies remain static colliders in Bullet.
 - `batch`/`delayed`: when spawns coexist, drop positions enforce a hard 3D separation of `2 * bounding_radius + max(collision_margin, 0.0005)` and lift candidates upward instead of silently accepting overlaps.
 - A physics explosion watchdog estimates per-object speed every frame and rejects the attempt early with `reason="physics_explosion"` when any activated object exceeds the speed limit or leaves the vertical sanity band.
@@ -140,8 +141,9 @@ Important generator options:
 - `--spawn-settle-frames`: default `35`. If greater than zero, each object receives a scheduled `spawn_frame` separated by this many frames. Objects are hidden and rigid-body-disabled before their spawn frame, then become active; earlier objects remain active, so the pile can keep adjusting while later objects fall. Use `0` only when intentionally reverting to batch-active behavior for comparison.
 - `--spawn-mode`: `progressive` (default), `delayed`, or `batch`. See the simulation notes above.
 - `--drop-clearance-min`, `--drop-clearance-max`: progressive mode drop height above the current pile top, in meters. Defaults `0.03`/`0.12`. The bounding radius is added automatically.
-- `--progressive-settle-frames`: progressive mode frames per object to fall and settle. Default `45`.
+- `--progressive-settle-frames`: progressive mode frames per object to fall and settle. Default `45`. Raise it if objects freeze before they settle.
 - `--final-relax-frames`: progressive mode final all-active relaxation frames. Default `60`.
+- `--progressive-freeze` / `--no-progressive-freeze`: freeze each settled object as a static collider (default, faster) or keep all objects active so the pile keeps re-settling (slower, avoids mid-fall freezing / floating).
 - `--drop-height-min`, `--drop-height-max`: random absolute spawn height range for `delayed`/`batch` modes only.
 - `--record-failed-video`: also render an MP4 of each rejected attempt into `<output>/rejected/`.
 - `--collision-margin`: rigid-body margin in meters. Current recommended value is `0.0005` (0.5 mm). The old `0.00002` value was below what Bullet handles robustly and contributed to deep-penetration impulses and wall tunneling.
