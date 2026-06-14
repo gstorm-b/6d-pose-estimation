@@ -22,7 +22,12 @@ import numpy as np
 from src.data.depth_unprojection import unproject_depth_to_camera
 from src.data.pose_crop_dataset import build_pose_model_features, positive_forward_depth_to_metadata_camera
 from src.inference.confidence import ConfidenceConfig, cluster_isolation, compute_instance_confidence
-from src.inference.instance_clustering import VotedCenterClusteringConfig, cluster_voted_centers
+from src.inference.instance_clustering import (
+    TwoStageClusteringConfig,
+    VotedCenterClusteringConfig,
+    cluster_voted_centers,
+    refine_instance_labels_two_stage,
+)
 from src.inference.pose_bridge import build_pose_instance_crops
 from src.training.pose_metrics import pose_predictions_to_object_to_camera
 
@@ -59,6 +64,7 @@ class PosePipeline:
         keypoints_object: np.ndarray,
         diameter_m: float,
         clustering: VotedCenterClusteringConfig,
+        two_stage: TwoStageClusteringConfig | None = None,
         confidence: ConfidenceConfig | None = None,
         instance_num_classes: int = 2,
         pose_num_points: int = 1024,
@@ -72,6 +78,7 @@ class PosePipeline:
         self.keypoints_object = np.asarray(keypoints_object, dtype=np.float32)
         self.diameter_m = float(diameter_m)
         self.clustering = clustering
+        self.two_stage = two_stage or TwoStageClusteringConfig()
         self.confidence_config = confidence or ConfidenceConfig()
         self.instance_num_classes = int(instance_num_classes)
         self.pose_num_points = int(pose_num_points)
@@ -100,6 +107,7 @@ class PosePipeline:
             keypoints_object=loaded.keypoints_object,
             diameter_m=loaded.diameter_m,
             clustering=clustering,
+            two_stage=TwoStageClusteringConfig.from_mapping(inference.get("two_stage_clustering")),
             confidence=ConfidenceConfig.from_mapping(inference.get("confidence")),
             instance_num_classes=instance_num_classes,
             pose_num_points=pose_num_points,
@@ -159,7 +167,12 @@ class PosePipeline:
             probabilities[:, 1] if self.instance_num_classes > 1 else np.zeros(points.shape[0], dtype=np.float32)
         )
         clustered = cluster_voted_centers(points_normalized, object_probabilities, offsets, self.clustering)
-        return np.asarray(clustered["instance_labels"], dtype=np.int64)
+        labels = np.asarray(clustered["instance_labels"], dtype=np.int64)
+        if self.two_stage.enabled:
+            labels = refine_instance_labels_two_stage(
+                points_normalized, np.asarray(clustered["voted_centers"], dtype=np.float32), labels, self.diameter_m, self.two_stage
+            )
+        return labels
 
     def _sample_indices(self, count: int, rng: np.random.Generator) -> np.ndarray:
         if count <= 0:

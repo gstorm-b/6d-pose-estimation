@@ -28,7 +28,7 @@ from src.data.validation import validate_dataset  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--raw", required=True, help="Raw Blender dataset root.")
+    parser.add_argument("--raw", required=True, nargs="+", help="One or more raw Blender dataset roots (merged; sample names are prefixed by root).")
     parser.add_argument("--out", required=True, help="Output processed dataset root.")
     parser.add_argument("--config", help="Optional JSON/YAML config file.")
     parser.add_argument("--num-points", type=int, help="Fixed point count per processed sample.")
@@ -154,23 +154,33 @@ def ensure_output_root(path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    raw_root = Path(args.raw)
+    raw_roots = [Path(r) for r in args.raw]
     out_root = Path(args.out)
     config, source_config = build_conversion_config(args)
 
-    if not args.skip_raw_validation:
-        report = validate_dataset(raw_root, project_root=PROJECT_ROOT)
-        if report.sample_count == 0:
-            raise RuntimeError(f"No raw samples found in {raw_root}")
-        if report.ok_count != report.sample_count:
-            raise RuntimeError(
-                f"Raw validation failed: {report.ok_count}/{report.sample_count} OK, "
-                f"status_counts={report.status_counts}"
-            )
+    from src.data.raw_dataset import RawSample
 
-    samples = discover_samples(raw_root)
-    if not samples:
-        raise RuntimeError(f"No raw sample folders found in {raw_root}")
+    samples: list[RawSample] = []
+    for raw_root in raw_roots:
+        if not args.skip_raw_validation:
+            report = validate_dataset(raw_root, project_root=PROJECT_ROOT)
+            if report.sample_count == 0:
+                raise RuntimeError(f"No raw samples found in {raw_root}")
+            if report.ok_count != report.sample_count:
+                raise RuntimeError(
+                    f"Raw validation failed for {raw_root}: {report.ok_count}/{report.sample_count} OK, "
+                    f"status_counts={report.status_counts}"
+                )
+        root_samples = discover_samples(raw_root)
+        if not root_samples:
+            raise RuntimeError(f"No raw sample folders found in {raw_root}")
+        # Prefix names with the root so merged samples stay unique.
+        prefix = raw_root.name if len(raw_roots) > 1 else ""
+        for sample in root_samples:
+            unique_name = f"{prefix}__{sample.name}" if prefix else sample.name
+            samples.append(RawSample(unique_name, sample.path))
+    raw_root = raw_roots[0]
+    print(f"[pointnet2] merged {len(samples)} samples from {len(raw_roots)} root(s)")
 
     ensure_output_root(out_root)
     splits = split_samples(samples, config)
@@ -192,6 +202,7 @@ def main() -> int:
 
     conversion_config = {
         "raw_root": str(raw_root),
+        "raw_roots": [str(r) for r in raw_roots],
         "out_root": str(out_root),
         "source_config": source_config,
         "conversion": {
