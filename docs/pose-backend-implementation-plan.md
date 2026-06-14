@@ -58,6 +58,34 @@ P3 Confidence scoring + ranking + top-K metric: DONE (2026-06-14)
 Wave 1 (P0-P3) COMPLETE. Default device is GPU with CPU fallback.
 ```
 
+Wave 2 implementation log (started 2026-06-14):
+
+```text
+Data prep: DONE
+  scripts/prepare_pointnet2_semseg_dataset.py --raw now accepts multiple roots (merged,
+  sample names prefixed by root). Merged bending_pipe_4..18 (skipping 12=1 sample, 14=missing)
+  = 1218 samples -> processed-data/pointnet2_semseg_bending_pipe_wave2 (train 974/val 122/test 122,
+  16384 points). Used --skip-raw-validation (datasets flagged SPARSE = few visible objects, not corrupt).
+P4 two-stage clustering: CODE DONE
+  src/inference/instance_clustering.py: TwoStageClusteringConfig + refine_instance_labels_two_stage
+    (split via 2-means on voted centers > split_separation_fraction*diameter; merge via union-find on
+    centroid proximity + point contiguity). Disabled by default; thresholds are diameter fractions.
+  src/inference/pose_pipeline.py predicted path applies it when bundle.inference.two_stage_clustering.enabled.
+  tests/test_instance_clustering_two_stage.py 4/4 (merge 2->1, split 1->2, disabled, config).
+  Instance retraining on the merged set RUNNING (background, 40 epochs batch 2 on MX150 ~ hours);
+  log experiments/wave2_instance_train.log.
+P5 pose retrain: GT crops exported
+  src/inference/pose_bridge.load_raw_metadata resolves merged prefixed names.
+  GT crops in experiments/wave2_pose_crops_bending_gt_{train,val,test} (974/122/122 crop files, all with GT pose).
+  Pose voting retraining PENDING (waits for the GPU to free after instance training).
+
+Remaining to finish Wave 2 (run after instance training frees the GPU):
+  1. Eval instance checkpoint on the test split; run the Phase 21 sweep incl. stage-2 thresholds.
+  2. Train pose voting: train_pointnet2_pose.py --config configs/train/pointnet2_pose_voting_bending_pipe.yaml
+       --data experiments/wave2_pose_crops_bending_gt_train --val-data .../gt_val --epochs 90 --batch-size 16 --device cuda
+  3. Eval pose (GT + predicted crops) against Gate A/B/C; repackage models/bending_pipe/v2 via package_model_bundle.py.
+```
+
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:
 
 1. The current repository state (instance segmentation Phase 0-10, pose Phase 11-23, generator physics fix 2026-06-10).
