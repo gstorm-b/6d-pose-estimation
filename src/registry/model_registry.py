@@ -119,15 +119,12 @@ class ModelRegistry:
             pass
 
     def _load_uncached(self, bundle: Bundle, *, device: str, ops_backend: str) -> LoadedBundle:
-        import torch
-
+        from src.inference.device import resolve_device
         from src.models.pointnet2_instance_seg import build_pointnet2_instance_seg_from_config
         from src.models.pointnet2_pose_voting import build_pointnet2_pose_voting_from_config
         from src.training.checkpoint import load_checkpoint
 
-        resolved_device = device
-        if resolved_device.startswith("cuda") and not torch.cuda.is_available():
-            resolved_device = "cpu"
+        resolved_device = resolve_device(device)
 
         manifest = bundle.manifest
         directory = bundle.directory

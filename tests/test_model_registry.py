@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src.inference.device import resolve_device  # noqa: E402
 from src.registry.bundle_schema import BundleValidationError  # noqa: E402
 from src.registry.model_registry import ModelRegistry  # noqa: E402
 
@@ -57,31 +58,42 @@ def test_resolve_unknown_sku_rejected() -> None:
     raise AssertionError("expected BundleValidationError for unknown sku")
 
 
-def test_load_on_cpu() -> None:
+def test_load_on_default_device() -> None:
     if not _have_bundles():
         print("  (skip: no packaged bundles)")
         return
+    device = resolve_device("cuda")  # GPU when available, else cpu
     registry = _registry()
     bundle = registry.resolve("K41144")
-    loaded = registry.load(bundle, device="cpu")
-    assert loaded.device == "cpu"
+    loaded = registry.load(bundle, device=device)
+    print(f"  loaded on device={loaded.device}")
+    assert loaded.device == device
     assert loaded.instance_model is not None
     assert loaded.pose_model is not None
     assert loaded.model_points_object.ndim == 2 and loaded.model_points_object.shape[1] == 3
     assert loaded.keypoints_object.shape[0] == bundle.manifest.model.keypoint_count
     assert loaded.diameter_m > 0
     # Cache hit returns the same object.
-    again = registry.load(bundle, device="cpu")
+    again = registry.load(bundle, device=device)
     assert again is loaded
+
+
+def test_cpu_fallback_loads() -> None:
+    if not _have_bundles():
+        print("  (skip: no packaged bundles)")
+        return
+    loaded = _registry().load(_registry().resolve("K41144"), device="cpu")
+    assert loaded.device == "cpu"
 
 
 def test_lru_eviction() -> None:
     if not _have_bundles():
         print("  (skip: no packaged bundles)")
         return
+    device = resolve_device("cuda")
     registry = _registry(vram_budget_bundles=1)
-    registry.load(registry.resolve("K41144"), device="cpu")
-    registry.load(registry.resolve("bending_pipe"), device="cpu")
+    registry.load(registry.resolve("K41144"), device=device)
+    registry.load(registry.resolve("bending_pipe"), device=device)
     assert len(registry._cache) == 1, f"expected 1 cached bundle, got {len(registry._cache)}"
 
 

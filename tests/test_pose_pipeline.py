@@ -31,11 +31,12 @@ def _prereqs() -> bool:
 
 
 def _load_pipeline():
+    from src.inference.device import resolve_device
     from src.inference.pose_pipeline import PosePipeline
     from src.registry.model_registry import ModelRegistry
 
     registry = ModelRegistry(MODELS_ROOT)
-    loaded = registry.load(registry.resolve("K41144"), device="cpu")
+    loaded = registry.load(registry.resolve("K41144"), device=resolve_device("cuda"))
     return PosePipeline.from_loaded_bundle(loaded), loaded
 
 
