@@ -21,6 +21,7 @@ import numpy as np
 
 from src.data.depth_unprojection import unproject_depth_to_camera
 from src.data.pose_crop_dataset import build_pose_model_features, positive_forward_depth_to_metadata_camera
+from src.inference.confidence import ConfidenceConfig, cluster_isolation, compute_instance_confidence
 from src.inference.instance_clustering import VotedCenterClusteringConfig, cluster_voted_centers
 from src.inference.pose_bridge import build_pose_instance_crops
 from src.training.pose_metrics import pose_predictions_to_object_to_camera
@@ -58,6 +59,7 @@ class PosePipeline:
         keypoints_object: np.ndarray,
         diameter_m: float,
         clustering: VotedCenterClusteringConfig,
+        confidence: ConfidenceConfig | None = None,
         instance_num_classes: int = 2,
         pose_num_points: int = 1024,
         scene_num_points: int = 16384,
@@ -70,6 +72,7 @@ class PosePipeline:
         self.keypoints_object = np.asarray(keypoints_object, dtype=np.float32)
         self.diameter_m = float(diameter_m)
         self.clustering = clustering
+        self.confidence_config = confidence or ConfidenceConfig()
         self.instance_num_classes = int(instance_num_classes)
         self.pose_num_points = int(pose_num_points)
         self.scene_num_points = int(scene_num_points)
@@ -97,6 +100,7 @@ class PosePipeline:
             keypoints_object=loaded.keypoints_object,
             diameter_m=loaded.diameter_m,
             clustering=clustering,
+            confidence=ConfidenceConfig.from_mapping(inference.get("confidence")),
             instance_num_classes=instance_num_classes,
             pose_num_points=pose_num_points,
             scene_num_points=int(inference.get("num_points", 16384)),
@@ -163,7 +167,7 @@ class PosePipeline:
         replace = count < self.pose_num_points
         return rng.choice(count, size=self.pose_num_points, replace=replace).astype(np.int64)
 
-    def _decode_crop_pose(self, crop: Any, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    def _decode_crop_pose(self, crop: Any, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, dict[str, float]]:
         import torch
 
         # Flip crop points/normals from positive-forward depth into metadata camera frame.
@@ -197,7 +201,20 @@ class PosePipeline:
         decoded = pose_predictions_to_object_to_camera(outputs, batch)
         rotation = decoded["rotation_object_to_camera"].squeeze(0).cpu().numpy().astype(np.float64)
         origin = decoded["object_origin_camera"].squeeze(0).cpu().numpy().astype(np.float64)
-        return rotation, origin
+
+        # Vote-dispersion diagnostics: how much the per-point votes disagree,
+        # normalized by diameter. Low dispersion -> confident pose.
+        diameter = max(self.diameter_m, 1e-8)
+        diagnostics: dict[str, float] = {}
+        if "predicted_origin_offsets_camera_normalized" in outputs:
+            origin_offsets = outputs["predicted_origin_offsets_camera_normalized"].squeeze(0).cpu().numpy()
+            origin_votes = sampled_points + origin_offsets * diameter
+            diagnostics["center_vote_dispersion"] = float(np.linalg.norm(origin_votes.std(axis=0))) / diameter
+        if "predicted_keypoint_offsets_camera_normalized" in outputs:
+            keypoint_offsets = outputs["predicted_keypoint_offsets_camera_normalized"].squeeze(0).cpu().numpy()
+            keypoint_votes = sampled_points[:, None, :] + keypoint_offsets * diameter
+            diagnostics["keypoint_dispersion"] = float(np.mean(np.linalg.norm(keypoint_votes.std(axis=0), axis=1))) / diameter
+        return rotation, origin, diagnostics
 
     def infer_from_points(
         self,
@@ -245,7 +262,7 @@ class PosePipeline:
         instances: list[ScenePoseInstance] = []
         t2 = time.perf_counter()
         for crop in crops:
-            rotation, origin = self._decode_crop_pose(crop, rng)
+            rotation, origin, diagnostics = self._decode_crop_pose(crop, rng)
             object_to_camera = np.eye(4, dtype=np.float64)
             object_to_camera[:3, :3] = rotation
             object_to_camera[:3, 3] = origin
@@ -258,10 +275,28 @@ class PosePipeline:
                         np.asarray(crop.points_camera, dtype=np.float32)
                     ).mean(axis=0),
                     matched_gt_iou=crop.matched_gt_iou,
+                    diagnostics=dict(diagnostics),
                 )
             )
         timings["pose_ms"] = (time.perf_counter() - t2) * 1000.0
 
+        # Confidence scoring: add cluster isolation, then rank highest-first.
+        if instances:
+            centroids = np.stack([inst.crop_centroid_camera for inst in instances], axis=0)
+            isolation = cluster_isolation(centroids, self.diameter_m)
+            for inst, iso in zip(instances, isolation):
+                features = dict(inst.diagnostics)
+                features["point_count"] = inst.point_count
+                features["cluster_isolation"] = None if not np.isfinite(iso) else float(iso)
+                confidence, sub_scores = compute_instance_confidence(features, self.confidence_config)
+                inst.confidence = confidence
+                inst.diagnostics["cluster_isolation"] = float(iso) if np.isfinite(iso) else None
+                inst.diagnostics["confidence_terms"] = sub_scores
+            instances.sort(key=lambda inst: (inst.confidence if inst.confidence is not None else -1.0), reverse=True)
+
+        min_confidence = getattr(options, "min_confidence", None) if options is not None else None
+        if min_confidence is not None:
+            instances = [inst for inst in instances if (inst.confidence or 0.0) >= float(min_confidence)]
         max_instances = getattr(options, "max_instances", None) if options is not None else None
         if max_instances is not None and len(instances) > int(max_instances):
             instances = instances[: int(max_instances)]

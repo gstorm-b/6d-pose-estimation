@@ -41,7 +41,21 @@ P2 End-to-end inference library: DONE (2026-06-14)
     median 3.59 mm (offline GT-crop reference ~5.6 mm) -> golden-consistent; depth->poses predicted
     path runs end to end with finite poses. Note: per-stage timings are returned; CPU instance stage
     is slow (~14 s) as expected, GPU is the deployment target.
-P3: pending.
+P3 Confidence scoring + ranking + top-K metric: DONE (2026-06-14)
+  src/inference/confidence.py: ConfidenceConfig (per-bundle tunable), compute_instance_confidence
+    (v1 = weighted geometric mean of bounded sub-scores from center-vote dispersion, keypoint
+    dispersion, point count, cluster isolation, optional object prob / refinement inliers),
+    cluster_isolation, top_k_pick_success (top1 / topk).
+  src/inference/pose_pipeline.py: decode returns vote-dispersion diagnostics; infer computes
+    isolation + confidence per instance and ranks highest-first; honors options.min_confidence /
+    max_instances.
+  tests/test_confidence.py (5/5).
+  Verified on a K41144 scene: confidence is strongly informative -- ADD of the top-confidence half
+    2.93 mm vs bottom half 10.52 mm; top-1 and top-3 pick success = 1 at the 0.1d (10 mm) threshold.
+  Follow-up (not blocking): wire --report-topk into eval_pointnet2_pose.py and the suite (the
+    metric function exists; pipeline ranking already proves the value).
+
+Wave 1 (P0-P3) COMPLETE. Default device is GPU with CPU fallback.
 ```
 
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:
