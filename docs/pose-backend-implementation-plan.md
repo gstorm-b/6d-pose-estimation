@@ -29,7 +29,19 @@ P1 Symmetry productization: DONE (2026-06-14)
   Gate met: JSON matrices match built-in within 1e-6; K41144 identity baseline ADD 1.8e-6 mm,
     success 1.0, rotation_error 0.0. Audit reproduces docs/k41144-pose-symmetry-audit.md
     (y180 mean 0.133 / p95 0.317 / max 0.847 mm; no continuous axis).
-P2-P3: pending.
+P2 End-to-end inference library: DONE (2026-06-14)
+  src/data/pose_crop_dataset.py: extracted build_pose_model_features (single source for the
+    pose model input + 18-d aux), __getitem__ refactored to use it (identity baseline unchanged).
+  src/inference/pose_pipeline.py: PosePipeline.from_loaded_bundle; infer_from_points (in-memory,
+    GT-label or predicted-clustering path) and infer_scene (depth -> unproject -> poses); reuses
+    instance model, cluster_voted_centers, build_pose_instance_crops, build_pose_model_features,
+    z-flip, and pose_predictions_to_object_to_camera. No file I/O in the call path.
+  tests/test_pose_pipeline.py (2/2).
+  Verified: K41144 GT-label path on a processed sample yields 30/30 instances, ADD mean 6.78 mm /
+    median 3.59 mm (offline GT-crop reference ~5.6 mm) -> golden-consistent; depth->poses predicted
+    path runs end to end with finite poses. Note: per-stage timings are returned; CPU instance stage
+    is slow (~14 s) as expected, GPU is the deployment target.
+P3: pending.
 ```
 
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:

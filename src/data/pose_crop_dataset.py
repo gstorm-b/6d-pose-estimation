@@ -133,33 +133,13 @@ class PoseCropDataset(Dataset):  # type: ignore[misc]
             )
         points_crop_centered_camera = sampled_points_camera - crop_centroid_camera.reshape(1, 3)
         points_pose_xyz = points_crop_centered_camera / max(self.geometry.model_diameter_m, 1e-8)
-        points_pose_input = points_pose_xyz
-        if sampled_features is not None:
-            points_pose_input = np.concatenate([points_pose_input, sampled_features.astype(np.float32)], axis=1)
-        bbox_min_camera = points_camera.min(axis=0).astype(np.float32)
-        bbox_max_camera = points_camera.max(axis=0).astype(np.float32)
-        normalized_crop_points = points_pose_xyz.astype(np.float32)
-        second_moment = np.mean(normalized_crop_points * normalized_crop_points, axis=0)
-        covariance_cross = np.asarray(
-            [
-                np.mean(normalized_crop_points[:, 0] * normalized_crop_points[:, 1]),
-                np.mean(normalized_crop_points[:, 0] * normalized_crop_points[:, 2]),
-                np.mean(normalized_crop_points[:, 1] * normalized_crop_points[:, 2]),
-            ],
-            dtype=np.float32,
+        points_pose_input, crop_aux_features, bbox_min_camera, bbox_max_camera = build_pose_model_features(
+            all_crop_points_camera=points_camera,
+            sampled_points_camera=sampled_points_camera,
+            sampled_features=sampled_features,
+            crop_centroid_camera=crop_centroid_camera,
+            model_diameter_m=self.geometry.model_diameter_m,
         )
-        third_moment = np.mean(normalized_crop_points * normalized_crop_points * normalized_crop_points, axis=0)
-        crop_aux_features = np.concatenate(
-            [
-                crop_centroid_camera / max(self.geometry.model_diameter_m, 1e-8),
-                (bbox_min_camera - crop_centroid_camera) / max(self.geometry.model_diameter_m, 1e-8),
-                (bbox_max_camera - crop_centroid_camera) / max(self.geometry.model_diameter_m, 1e-8),
-                second_moment,
-                covariance_cross,
-                third_moment,
-            ],
-            axis=0,
-        ).astype(np.float32)
         rotation_object_to_camera = object_to_camera[:3, :3]
         object_origin_camera = object_to_camera[:3, 3]
         offset_camera = object_origin_camera - crop_centroid_camera
@@ -278,6 +258,56 @@ class PoseCropDataset(Dataset):  # type: ignore[misc]
             None if sampled_features_aug is None else sampled_features_aug.astype(np.float32),
             None if all_features_aug is None else all_features_aug.astype(np.float32),
         )
+
+
+def build_pose_model_features(
+    *,
+    all_crop_points_camera: np.ndarray,
+    sampled_points_camera: np.ndarray,
+    sampled_features: np.ndarray | None,
+    crop_centroid_camera: np.ndarray,
+    model_diameter_m: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build the pose model input and 18-d aux features for one crop.
+
+    Single source shared by `PoseCropDataset.__getitem__` and the inference
+    pipeline so training and serving compute identical features. xyz is
+    crop-centered and diameter-normalized; bbox extents use ALL crop points while
+    the central moments use the sampled, normalized points. Returns
+    (points_pose_input, crop_aux_features, bbox_min_camera, bbox_max_camera).
+    """
+
+    diameter = max(float(model_diameter_m), 1e-8)
+    points_crop_centered_camera = sampled_points_camera - crop_centroid_camera.reshape(1, 3)
+    points_pose_xyz = (points_crop_centered_camera / diameter).astype(np.float32)
+    points_pose_input = points_pose_xyz
+    if sampled_features is not None:
+        points_pose_input = np.concatenate([points_pose_xyz, sampled_features.astype(np.float32)], axis=1)
+    bbox_min_camera = all_crop_points_camera.min(axis=0).astype(np.float32)
+    bbox_max_camera = all_crop_points_camera.max(axis=0).astype(np.float32)
+    normalized_crop_points = points_pose_xyz.astype(np.float32)
+    second_moment = np.mean(normalized_crop_points * normalized_crop_points, axis=0)
+    covariance_cross = np.asarray(
+        [
+            np.mean(normalized_crop_points[:, 0] * normalized_crop_points[:, 1]),
+            np.mean(normalized_crop_points[:, 0] * normalized_crop_points[:, 2]),
+            np.mean(normalized_crop_points[:, 1] * normalized_crop_points[:, 2]),
+        ],
+        dtype=np.float32,
+    )
+    third_moment = np.mean(normalized_crop_points * normalized_crop_points * normalized_crop_points, axis=0)
+    crop_aux_features = np.concatenate(
+        [
+            crop_centroid_camera / diameter,
+            (bbox_min_camera - crop_centroid_camera) / diameter,
+            (bbox_max_camera - crop_centroid_camera) / diameter,
+            second_moment,
+            covariance_cross,
+            third_moment,
+        ],
+        axis=0,
+    ).astype(np.float32)
+    return points_pose_input.astype(np.float32), crop_aux_features, bbox_min_camera, bbox_max_camera
 
 
 def build_pose_crop_dataset_from_config(
