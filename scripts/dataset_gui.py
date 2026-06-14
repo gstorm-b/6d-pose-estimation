@@ -516,6 +516,19 @@ class DatasetGui(QMainWindow):
             "On (default): freeze each object as a static collider once settled (faster). "
             "Off: keep settled objects active so the pile keeps re-settling (slower, avoids objects frozen mid-fall / floating)."
         )
+        # Grid mode: tidy rows/columns.
+        self.grid_spacing_spin = self._double_spin(0.0, 1.0, 0.005, 3, 0.001)
+        self.grid_spacing_spin.setToolTip("Grid mode: gap between objects in a row/column, in meters.")
+        self.grid_drop_clearance_spin = self._double_spin(0.0, 1.0, 0.005, 3, 0.001)
+        self.grid_drop_clearance_spin.setToolTip("Grid mode: height each object/layer is placed above the floor/pile before settling.")
+        self.grid_jitter_spin = self._double_spin(0.0, 1.0, 0.0, 3, 0.001)
+        self.grid_jitter_spin.setToolTip("Grid mode: random position (m) and angle (rad) jitter for variety. 0 = perfectly tidy.")
+        self.grid_layers_spin = self._spin(0, 100, 0)
+        self.grid_layers_spin.setToolTip("Grid mode: number of stacked layers. 0 = auto (enough layers for all objects).")
+        self.grid_auto_orientation_check = QCheckBox("Auto-flat orientation (grid)")
+        self.grid_auto_orientation_check.setChecked(True)
+        self.grid_auto_orientation_check.setToolTip("On: lay the object flattest automatically. Off: use the euler degrees below.")
+        self.grid_orientation_row, self.grid_orientation_spins = self._xyz_spins((0.0, 0.0, 0.0), minimum=-360.0, maximum=360.0, decimals=1, step=5.0)
         self.drop_height_min_spin = self._double_spin(0.001, 5.0, 0.12, 3, 0.01)
         self.drop_height_min_spin.setToolTip("delayed/batch modes only: minimum absolute drop height.")
         self.drop_height_max_spin = self._double_spin(0.001, 5.0, 0.34, 3, 0.01)
@@ -585,7 +598,7 @@ class DatasetGui(QMainWindow):
         self.video_fps_spin = self._spin(1, 120, 24)
 
         self.spawn_mode_combo = QComboBox()
-        self.spawn_mode_combo.addItems(["progressive", "delayed", "batch"])
+        self.spawn_mode_combo.addItems(["progressive", "grid", "delayed", "batch"])
         self.spawn_mode_combo.setToolTip(
             "progressive: drop one object at a time onto the pile (fewest out-of-bin ejections). "
             "delayed/batch: legacy modes using absolute drop heights and spawn settle frames."
@@ -658,6 +671,12 @@ class DatasetGui(QMainWindow):
         spawn_form.addRow("Progressive settle frames", self.progressive_settle_frames_spin)
         spawn_form.addRow("Final relax frames", self.final_relax_frames_spin)
         spawn_form.addRow("Freeze settled", self.progressive_freeze_check)
+        spawn_form.addRow("Grid spacing", self.grid_spacing_spin)
+        spawn_form.addRow("Grid drop clearance", self.grid_drop_clearance_spin)
+        spawn_form.addRow("Grid jitter", self.grid_jitter_spin)
+        spawn_form.addRow("Grid layers (0=auto)", self.grid_layers_spin)
+        spawn_form.addRow("Grid auto-flat", self.grid_auto_orientation_check)
+        spawn_form.addRow("Grid orientation deg", self.grid_orientation_row)
         spawn_form.addRow("Drop min (legacy)", self.drop_height_min_spin)
         spawn_form.addRow("Drop max (legacy)", self.drop_height_max_spin)
         spawn_form.addRow("Spawn strategy (legacy)", self.spawn_strategy_combo)
@@ -989,6 +1008,11 @@ class DatasetGui(QMainWindow):
             "progressive_settle_frames": self.progressive_settle_frames_spin.value(),
             "final_relax_frames": self.final_relax_frames_spin.value(),
             "progressive_freeze": self.progressive_freeze_check.isChecked(),
+            "grid_spacing": self.grid_spacing_spin.value(),
+            "grid_drop_clearance": self.grid_drop_clearance_spin.value(),
+            "grid_jitter": self.grid_jitter_spin.value(),
+            "grid_layers": self.grid_layers_spin.value(),
+            "grid_orientation": None if self.grid_auto_orientation_check.isChecked() else self._xyz_values(self.grid_orientation_spins),
             "drop_height_min": self.drop_height_min_spin.value(),
             "drop_height_max": self.drop_height_max_spin.value(),
             "spawn_strategy": self.spawn_strategy_combo.currentText(),
@@ -1052,6 +1076,7 @@ class DatasetGui(QMainWindow):
             "spawn_settle_frames": self.spawn_settle_frames_spin,
             "progressive_settle_frames": self.progressive_settle_frames_spin,
             "final_relax_frames": self.final_relax_frames_spin,
+            "grid_layers": self.grid_layers_spin,
             "min_visible_objects": self.min_visible_objects_spin,
             "min_visible_points": self.min_visible_points_spin,
             "max_sample_attempts": self.max_sample_attempts_spin,
@@ -1084,6 +1109,9 @@ class DatasetGui(QMainWindow):
             "bin_restitution": self.bin_restitution_spin,
             "drop_clearance_min": self.drop_clearance_min_spin,
             "drop_clearance_max": self.drop_clearance_max_spin,
+            "grid_spacing": self.grid_spacing_spin,
+            "grid_drop_clearance": self.grid_drop_clearance_spin,
+            "grid_jitter": self.grid_jitter_spin,
             "drop_height_min": self.drop_height_min_spin,
             "drop_height_max": self.drop_height_max_spin,
             "spawn_min_distance": self.spawn_min_distance_spin,
@@ -1144,6 +1172,12 @@ class DatasetGui(QMainWindow):
             self.record_failed_video_check.setChecked(bool(settings["record_failed_video"]))
         if "progressive_freeze" in settings:
             self.progressive_freeze_check.setChecked(bool(settings["progressive_freeze"]))
+        if "grid_orientation" in settings:
+            grid_orientation = settings["grid_orientation"]
+            auto = grid_orientation is None
+            self.grid_auto_orientation_check.setChecked(auto)
+            if not auto:
+                self._set_xyz_values(self.grid_orientation_spins, grid_orientation)
 
     def import_generation_settings(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import generator preset", str(PROJECT_ROOT), "JSON files (*.json);;All files (*)")
@@ -1496,8 +1530,12 @@ class DatasetGui(QMainWindow):
         self.process.start()
 
     def estimated_simulation_frames(self) -> int:
-        if self.spawn_mode_combo.currentText() == "progressive":
+        mode = self.spawn_mode_combo.currentText()
+        if mode == "progressive":
             return self.objects_spin.value() * max(1, self.progressive_settle_frames_spin.value()) + max(0, self.final_relax_frames_spin.value())
+        if mode == "grid":
+            approx_layers = max(1, (self.objects_spin.value() + 7) // 8)
+            return approx_layers * max(1, self.progressive_settle_frames_spin.value()) + max(0, self.final_relax_frames_spin.value())
         spawn_settle_frames = self.spawn_settle_frames_spin.value()
         if spawn_settle_frames <= 0:
             return self.settle_frames_spin.value()

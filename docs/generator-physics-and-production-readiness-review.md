@@ -93,6 +93,10 @@ The GUI now runs the generator by writing all its settings to `.gui_generation_p
 
 Density guidance: lower `object_friction` (0.2-0.4) lets parts slide into gaps for a denser bottom layer; combine with low restitution, `--no-progressive-freeze`, and more `final_relax_frames`. CONVEX_HULL still caps achievable density for concave parts (deferred fix E, V-HACD).
 
+### Grid Spawn Mode (2026-06-14)
+
+`--spawn-mode grid` generates tidy, ordered scenes instead of random piles: objects are placed at a fixed orientation in a row-major grid sized to the bin footprint, then settled per layer. Objects beyond one layer's capacity stack into further layers, each placed just above the settled pile below (reusing `pile_top_z`, the explosion watchdog, the recorder, and center-based out-of-bin). Orientation defaults to auto-flat (rotate the object's smallest bbox dimension to point down) and can be overridden with `--grid-orientation` euler degrees; `--grid-jitter` adds optional position/angle noise. Footprint and pitch come from the orientation-rotated bbox, so `cols/rows` adapt to each object. Verified: K41144 auto-flat `(0,0,0)` 7x2 single layer 12/12 in bin; bending_pipe auto-flat `(90,0,0)` 6x2 two layers 18/18 in bin; grid video and jitter render; progressive/delayed/batch unchanged. Maintained presets: `configs/generator/k41144_grid.json`, `configs/generator/bending_pipe_grid.json`.
+
 ## Part 2: Production Readiness Review
 
 ### Verdict

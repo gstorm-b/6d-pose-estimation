@@ -78,7 +78,11 @@ The generator's recommended input is a single JSON preset that contains every pa
 ```text
 configs/generator/k41144_progressive.json
 configs/generator/bending_pipe_progressive.json
+configs/generator/k41144_grid.json
+configs/generator/bending_pipe_grid.json
 ```
+
+The `_grid` presets use `spawn-mode grid` to produce tidy, ordered scenes (objects placed in rows/columns at a flat orientation and settled per layer) instead of random piles. Auto-flat orientation is on by default; set `grid_orientation` (XYZ euler degrees) to override, raise `grid_jitter` for small variety, and set `grid_layers` (0 = auto stacking).
 
 Run Blender with only the preset (and optionally an output override):
 

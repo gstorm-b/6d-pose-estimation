@@ -23,7 +23,7 @@ from typing import Any
 
 import bpy
 import numpy as np
-from mathutils import Matrix, Vector
+from mathutils import Euler, Matrix, Vector
 
 
 OBJECT_CLASS_ID = 1
@@ -314,13 +314,40 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--spawn-min-distance", type=float, default=0.045)
     parser.add_argument(
         "--spawn-mode",
-        choices=("progressive", "delayed", "batch"),
+        choices=("progressive", "grid", "delayed", "batch"),
         default="progressive",
         help=(
             "progressive: drop one object at a time just above the current pile, settle, freeze "
             "as a passive collider, then drop the next (PyBullet-style, fewest out-of-bin ejections). "
+            "grid: place objects in tidy rows/columns at a fixed orientation, settle per layer. "
             "delayed: legacy parked delayed-activation. batch: all objects active from frame 1."
         ),
+    )
+    parser.add_argument("--grid-spacing", type=float, default=0.005, help="Grid mode: gap between objects in a row/column, in meters.")
+    parser.add_argument(
+        "--grid-drop-clearance",
+        type=float,
+        default=0.005,
+        help="Grid mode: height each object/layer is placed above the floor or pile before settling, in meters.",
+    )
+    parser.add_argument(
+        "--grid-jitter",
+        type=float,
+        default=0.0,
+        help="Grid mode: random position (m) and orientation (rad) jitter for variety. 0 = perfectly tidy.",
+    )
+    parser.add_argument(
+        "--grid-orientation",
+        type=float,
+        nargs=3,
+        default=None,
+        help="Grid mode: object orientation as XYZ euler degrees. Omit for auto-flat (smallest dimension down).",
+    )
+    parser.add_argument(
+        "--grid-layers",
+        type=int,
+        default=0,
+        help="Grid mode: number of stacked layers. 0 = auto (enough layers to place all objects).",
     )
     parser.add_argument(
         "--drop-clearance-min",
@@ -831,14 +858,18 @@ def spawn_active_object_copy(
     idx: int,
     location: tuple[float, float, float],
     physics: ObjectPhysicsSettings,
+    rotation_euler: tuple[float, float, float] | None = None,
 ) -> bpy.types.Object:
-    """Create one linked-mesh copy as an active rigid body at the given location."""
+    """Create one linked-mesh copy as an active rigid body at the given location.
+
+    `rotation_euler` (radians) sets a fixed orientation; None uses a random one.
+    """
 
     obj = template.copy()
     obj.data = template.data
     obj.name = f"{safe_name}_{idx + 1:03d}"
     obj.location = location
-    obj.rotation_euler = random_rotation()
+    obj.rotation_euler = random_rotation() if rotation_euler is None else rotation_euler
     obj.hide_viewport = False
     obj.hide_render = False
     bpy.context.collection.objects.link(obj)
@@ -1027,6 +1058,212 @@ def simulate_progressive(
                 f"[synthetic] progressive dropped object {idx + 1}/{count} "
                 f"pile_top={top:.3f} drop_z={drop_z:.3f} settled_z={settled_z:.3f} freeze={freeze_settled}"
             )
+
+    template.hide_viewport = True
+    template.hide_render = True
+
+    relax_frames = max(0, int(final_relax_frames))
+    if relax_frames > 0 and objects:
+        for obj in objects:
+            obj.animation_data_clear()
+            if obj.rigid_body is not None:
+                obj.rigid_body.type = "ACTIVE"
+        bake_physics_window(relax_frames, substeps, solver_iterations, gravity_z)
+        relax_watchdog = PhysicsExplosionWatchdog(
+            enabled=watchdog_speed_limit > 0.0,
+            speed_limit_m_s=watchdog_speed_limit,
+            z_min_limit_m=out_of_bin_min_z,
+            z_max_limit_m=pile_top_z(objects) + 0.30,
+            fps=fps,
+            objects=list(objects),
+            spawn_frames={obj.name: 1 for obj in objects},
+            use_evaluated=True,
+        )
+        for frame in range(1, relax_frames + 1):
+            scene.frame_set(frame)
+            bpy.context.view_layer.update()
+            if recorder is not None:
+                recorder.record_current(frame_override=global_frame)
+            global_frame += 1
+            violation = relax_watchdog.check_current_frame()
+            if violation is not None:
+                violation["stage"] = "final_relax"
+                return objects, violation, global_frame
+
+    return objects, None, global_frame
+
+
+def template_local_bbox(template: bpy.types.Object) -> tuple[Vector, Vector]:
+    """Local-space bbox (min, max) of the recentered template mesh."""
+
+    corners = [Vector(corner) for corner in template.bound_box]
+    if not corners:
+        return Vector((0.0, 0.0, 0.0)), Vector((0.0, 0.0, 0.0))
+    min_corner = Vector((min(c.x for c in corners), min(c.y for c in corners), min(c.z for c in corners)))
+    max_corner = Vector((max(c.x for c in corners), max(c.y for c in corners), max(c.z for c in corners)))
+    return min_corner, max_corner
+
+
+def auto_flat_orientation(template: bpy.types.Object) -> tuple[float, float, float]:
+    """Euler (radians) that lays the object flattest: its smallest dimension points down."""
+
+    min_corner, max_corner = template_local_bbox(template)
+    dims = max_corner - min_corner
+    smallest_axis = min(range(3), key=lambda axis: dims[axis])
+    if smallest_axis == 2:
+        return (0.0, 0.0, 0.0)
+    if smallest_axis == 0:
+        return (0.0, math.pi / 2.0, 0.0)  # x -> z
+    return (math.pi / 2.0, 0.0, 0.0)  # y -> z
+
+
+def oriented_footprint(template: bpy.types.Object, euler_rad: tuple[float, float, float]) -> tuple[float, float, float]:
+    """Axis-aligned (x, y, z) extents of the template bbox rotated by the given euler."""
+
+    min_corner, max_corner = template_local_bbox(template)
+    rotation = Euler(euler_rad, "XYZ").to_matrix()
+    corners = [
+        rotation @ Vector((x, y, z))
+        for x in (min_corner.x, max_corner.x)
+        for y in (min_corner.y, max_corner.y)
+        for z in (min_corner.z, max_corner.z)
+    ]
+    extent_x = max(c.x for c in corners) - min(c.x for c in corners)
+    extent_y = max(c.y for c in corners) - min(c.y for c in corners)
+    extent_z = max(c.z for c in corners) - min(c.z for c in corners)
+    return float(extent_x), float(extent_y), float(extent_z)
+
+
+def simulate_grid(
+    template: bpy.types.Object,
+    class_name: str,
+    count: int,
+    bin_x: float,
+    bin_y: float,
+    grid_spacing: float,
+    grid_drop_clearance: float,
+    grid_jitter: float,
+    grid_orientation_deg: tuple[float, float, float] | None,
+    grid_layers: int,
+    final_relax_frames: int,
+    layer_settle_frames: int,
+    physics: ObjectPhysicsSettings,
+    appearance: ObjectAppearance,
+    substeps: int,
+    solver_iterations: int,
+    gravity_z: float,
+    watchdog_speed_limit: float,
+    out_of_bin_min_z: float,
+    freeze_settled: bool = True,
+    recorder: SimulationVideoRecorder | None = None,
+) -> tuple[list[bpy.types.Object], dict[str, Any] | None, int]:
+    """Place objects in tidy rows/columns at a fixed orientation, settling per layer.
+
+    Returns (objects, explosion_violation_or_None, total_global_frames). Objects fill
+    a row-major grid sized to the bin footprint; extra objects stack in further layers.
+    Each layer is placed just above the current pile, then settled (and optionally
+    frozen) before the next layer. With `grid_jitter > 0`, small position/orientation
+    noise is added for variety while keeping the arrangement tidy.
+    """
+
+    safe_name = apply_object_material(template, class_name, appearance)
+    if grid_orientation_deg is not None:
+        orientation = tuple(math.radians(float(a)) for a in grid_orientation_deg)
+    else:
+        orientation = auto_flat_orientation(template)
+    footprint_x, footprint_y, footprint_z = oriented_footprint(template, orientation)
+    pitch_x = footprint_x + max(0.0, grid_spacing)
+    pitch_y = footprint_y + max(0.0, grid_spacing)
+
+    # Center positions must keep the whole footprint inside the bin.
+    usable_x = max(0.0, bin_x - footprint_x)
+    usable_y = max(0.0, bin_y - footprint_y)
+    cols = max(1, int(usable_x / pitch_x) + 1)
+    rows = max(1, int(usable_y / pitch_y) + 1)
+    per_layer = cols * rows
+    if grid_layers and grid_layers > 0:
+        layers = int(grid_layers)
+    else:
+        layers = max(1, math.ceil(count / per_layer))
+    span_x = (cols - 1) * pitch_x
+    span_y = (rows - 1) * pitch_y
+
+    synthetic_log(
+        f"[synthetic] grid layout: cols={cols} rows={rows} per_layer={per_layer} layers={layers} "
+        f"footprint=({footprint_x:.3f},{footprint_y:.3f},{footprint_z:.3f}) "
+        f"orientation_deg=({math.degrees(orientation[0]):.0f},{math.degrees(orientation[1]):.0f},{math.degrees(orientation[2]):.0f})"
+    )
+
+    window = max(1, int(layer_settle_frames))
+    fps = float(bpy.context.scene.render.fps)
+    scene = bpy.context.scene
+    objects: list[bpy.types.Object] = []
+    global_frame = 1
+    placed = 0
+    for layer in range(layers):
+        if placed >= count:
+            break
+        top = pile_top_z(objects)
+        layer_z = top + footprint_z / 2.0 + max(0.0, grid_drop_clearance)
+        layer_objects: list[bpy.types.Object] = []
+        for slot in range(per_layer):
+            if placed >= count:
+                break
+            col = slot % cols
+            row = slot // cols
+            x = -span_x / 2.0 + col * pitch_x
+            y = -span_y / 2.0 + row * pitch_y
+            rot = list(orientation)
+            if grid_jitter > 0.0:
+                x += random.uniform(-grid_jitter, grid_jitter)
+                y += random.uniform(-grid_jitter, grid_jitter)
+                rot = [angle + random.uniform(-grid_jitter, grid_jitter) for angle in orientation]
+            obj = spawn_active_object_copy(
+                template, safe_name, placed, (x, y, layer_z), physics, rotation_euler=tuple(rot)
+            )
+            obj["spawn_layer"] = layer
+            obj["spawn_height"] = layer_z
+            obj["spawn_edge_margin"] = 0.0
+            obj["spawn_z_lift_steps"] = 0
+            obj["spawn_parked"] = False
+            obj["spawn_frame"] = global_frame
+            objects.append(obj)
+            layer_objects.append(obj)
+            placed += 1
+            if recorder is not None:
+                recorder.register_object(obj, spawn_frame=global_frame)
+
+        bake_physics_window(window, substeps, solver_iterations, gravity_z)
+        watchdog = PhysicsExplosionWatchdog(
+            enabled=watchdog_speed_limit > 0.0,
+            speed_limit_m_s=watchdog_speed_limit,
+            z_min_limit_m=out_of_bin_min_z,
+            z_max_limit_m=layer_z + 0.30,
+            fps=fps,
+            objects=list(layer_objects),
+            spawn_frames={obj.name: 1 for obj in layer_objects},
+            use_evaluated=True,
+        )
+        violation: dict[str, Any] | None = None
+        for frame in range(1, window + 1):
+            scene.frame_set(frame)
+            bpy.context.view_layer.update()
+            if recorder is not None:
+                recorder.record_current(frame_override=global_frame)
+            global_frame += 1
+            violation = watchdog.check_current_frame()
+            if violation is not None:
+                break
+        if violation is not None:
+            violation["stage"] = f"layer_{layer + 1}"
+            return objects, violation, global_frame
+
+        if freeze_settled and layer < layers - 1:
+            for obj in layer_objects:
+                freeze_object_as_passive(obj)
+        else:
+            rebase_active_objects_to_settled(objects)
+        synthetic_log(f"[synthetic] grid placed layer {layer + 1}/{layers}, objects so far {placed}/{count}")
 
     template.hide_viewport = True
     template.hide_render = True
@@ -1313,6 +1550,11 @@ def advance_scene_frames(
 def simulation_frame_count(args: argparse.Namespace) -> int:
     if args.spawn_mode == "progressive":
         return args.objects * max(1, args.progressive_settle_frames) + max(0, args.final_relax_frames)
+    if args.spawn_mode == "grid":
+        # Layout (layers) is computed at runtime from the object footprint; this is
+        # only a logging estimate assuming a few objects per layer.
+        approx_layers = max(1, math.ceil(args.objects / 8))
+        return approx_layers * max(1, args.progressive_settle_frames) + max(0, args.final_relax_frames)
     if args.spawn_settle_frames <= 0:
         return args.settle_frames
     return 1 + args.settle_frames + max(0, args.objects - 1) * args.spawn_settle_frames
@@ -1951,6 +2193,39 @@ def simulate_attempt(
         video_frame_end = max(used_frames, recorder.last_recorded_frame)
         return objects, violation, effective_speed_limit, video_frame_end, {"parked_spawns": 0, "spawn_z_lift_events": 0}
 
+    if args.spawn_mode == "grid":
+        if args.explosion_speed_limit is None:
+            # Objects are placed a short clearance above the floor/pile, so the
+            # speed bound comes from the drop clearance, not the bin height.
+            effective_speed_limit = auto_explosion_speed_limit(args.grid_drop_clearance)
+        else:
+            effective_speed_limit = float(args.explosion_speed_limit)
+        objects, violation, used_frames = simulate_grid(
+            scene_context.template,
+            scene_context.class_name,
+            args.objects,
+            args.bin_x,
+            args.bin_y,
+            args.grid_spacing,
+            args.grid_drop_clearance,
+            args.grid_jitter,
+            tuple(args.grid_orientation) if args.grid_orientation is not None else None,
+            args.grid_layers,
+            args.final_relax_frames,
+            args.progressive_settle_frames,
+            physics_settings,
+            appearance,
+            args.physics_substeps,
+            args.physics_solver_iterations,
+            args.gravity,
+            effective_speed_limit,
+            watchdog_z_min,
+            freeze_settled=args.progressive_freeze,
+            recorder=recorder,
+        )
+        video_frame_end = max(used_frames, recorder.last_recorded_frame)
+        return objects, violation, effective_speed_limit, video_frame_end, {"parked_spawns": 0, "spawn_z_lift_events": 0}
+
     reset_physics_cache(total_frames, args.physics_substeps, args.physics_solver_iterations, args.gravity)
     objects = create_object_instances(
         scene_context.template,
@@ -2108,6 +2383,11 @@ def build_sample(
             "progressive_settle_frames": args.progressive_settle_frames,
             "final_relax_frames": args.final_relax_frames,
             "progressive_freeze": args.progressive_freeze,
+            "grid_spacing": args.grid_spacing,
+            "grid_drop_clearance": args.grid_drop_clearance,
+            "grid_jitter": args.grid_jitter,
+            "grid_orientation": list(args.grid_orientation) if args.grid_orientation is not None else None,
+            "grid_layers": args.grid_layers,
             "objects_per_layer": args.objects_per_layer,
             "spawn_min_distance": args.spawn_min_distance,
             "spawn_settle_frames": args.spawn_settle_frames,
@@ -2275,6 +2555,11 @@ def main() -> None:
         "progressive_settle_frames": args.progressive_settle_frames,
         "final_relax_frames": args.final_relax_frames,
         "progressive_freeze": args.progressive_freeze,
+        "grid_spacing": args.grid_spacing,
+        "grid_drop_clearance": args.grid_drop_clearance,
+        "grid_jitter": args.grid_jitter,
+        "grid_orientation": list(args.grid_orientation) if args.grid_orientation is not None else None,
+        "grid_layers": args.grid_layers,
         "objects_per_layer": args.objects_per_layer,
         "spawn_min_distance": args.spawn_min_distance,
         "spawn_settle_frames": args.spawn_settle_frames,
