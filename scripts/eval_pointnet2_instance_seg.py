@@ -32,9 +32,11 @@ from src.data.augmentation import PointCloudAugmentationConfig  # noqa: E402
 from src.data.pointnet2_instance_dataset import PointNet2InstanceSegDataset  # noqa: E402
 from src.inference.instance_clustering import (  # noqa: E402
     InstanceMetricConfig,
+    TwoStageClusteringConfig,
     VotedCenterClusteringConfig,
     cluster_voted_centers,
     evaluate_instance_predictions,
+    refine_instance_labels_two_stage,
 )
 from src.models.pointnet2_instance_seg import build_pointnet2_instance_seg_from_config  # noqa: E402
 from src.training.checkpoint import load_checkpoint  # noqa: E402
@@ -67,6 +69,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dbscan-eps-sweep-m", help="Comma-separated DBSCAN eps sweep in meters.")
     parser.add_argument("--dbscan-min-samples", type=int, help="Override DBSCAN min_samples.")
     parser.add_argument("--min-cluster-points", type=int, help="Override minimum accepted cluster points.")
+    parser.add_argument("--two-stage", action="store_true", help="Apply stage-2 merge/split refinement after DBSCAN.")
+    parser.add_argument("--object-diameter-m", type=float, help="Object diameter in meters (required for --two-stage thresholds).")
+    parser.add_argument("--two-stage-merge-center-fraction", type=float, default=0.5)
+    parser.add_argument("--two-stage-merge-contiguity-fraction", type=float, default=0.25)
+    parser.add_argument("--two-stage-split-separation-fraction", type=float, default=0.7)
+    parser.add_argument("--two-stage-split-min-points", type=int, default=32)
     return parser.parse_args()
 
 
@@ -193,6 +201,8 @@ def evaluate_sample(
     eps_sweep: list[float],
     num_classes: int,
     preview_dir: Path | None,
+    two_stage_config: TwoStageClusteringConfig | None = None,
+    object_diameter_m: float | None = None,
 ) -> tuple[dict[str, Any], np.ndarray, np.ndarray]:
     import torch
 
@@ -214,6 +224,10 @@ def evaluate_sample(
     cluster_result = cluster_voted_centers(points_camera, object_probabilities, predicted_offsets, clustering_config)
     predicted_instances = np.asarray(cluster_result["instance_labels"], dtype=np.int64)
     voted_centers = np.asarray(cluster_result["voted_centers"], dtype=np.float32)
+    if two_stage_config is not None and two_stage_config.enabled and object_diameter_m:
+        predicted_instances = refine_instance_labels_two_stage(
+            points_camera, voted_centers, predicted_instances, object_diameter_m, two_stage_config
+        )
     instance_metrics = evaluate_instance_predictions(target_instances, predicted_instances, metric_config)
     sample_offset_metrics = offset_metrics(predicted_offsets, target_offsets, valid_instance_mask)
 
@@ -298,6 +312,15 @@ def main() -> int:
 
     dataset, data_root = build_dataset(config, args, seed)
     clustering_config = build_clustering_config(config, args)
+    two_stage_config = TwoStageClusteringConfig(
+        enabled=bool(args.two_stage),
+        merge_center_fraction=args.two_stage_merge_center_fraction,
+        merge_contiguity_fraction=args.two_stage_merge_contiguity_fraction,
+        split_separation_fraction=args.two_stage_split_separation_fraction,
+        split_min_points=args.two_stage_split_min_points,
+    )
+    if args.two_stage and not args.object_diameter_m:
+        raise ValueError("--two-stage requires --object-diameter-m")
     metric_config = InstanceMetricConfig.from_mapping(config.get("metrics", {}))
     eps_sweep = parse_eps_sweep(args.dbscan_eps_sweep_m, config, clustering_config.dbscan_eps_m)
     preview_dir: Path | None = None
@@ -322,6 +345,8 @@ def main() -> int:
             eps_sweep,
             num_classes,
             sample_preview_dir,
+            two_stage_config,
+            args.object_diameter_m,
         )
         samples.append(sample_summary)
         overall_semantic.update(predicted_semantic, target_semantic)

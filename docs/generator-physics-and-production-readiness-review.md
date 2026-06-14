@@ -79,6 +79,24 @@ Existing datasets re-validated with center-based rule: K41144 77/77 OK, bending_
 
 Verified preset: `configs/generator/bending_pipe_progressive.json`. The older `bending_pipe_active_spawn_stable.json` is kept as a delayed-mode reference.
 
+### Progressive Freeze Toggle (2026-06-12)
+
+Freezing a settled object as a passive collider assumes it has actually settled within its window. If the window is too short, an object can be frozen mid-fall and left floating, since later objects rest on it and it never moves again. `--no-progressive-freeze` (GUI: "Freeze settled" off) keeps every dropped object ACTIVE and re-bases the whole pile to its settled pose each stage, so the pile re-settles continuously and nothing is frozen mid-fall. Cost is higher (all active bodies re-simulate per stage). Quantified on K41144 at a deliberately short 12-frame settle window with no final relax: pile top 67.1 mm with freeze on vs 57.7 mm with freeze off. Default stays freeze-on (faster); raising `--progressive-settle-frames` is the cheaper first remedy for occasional floating.
+
+### Full Parameter Exposure, JSON-Only Input, GUI Groups (2026-06-13)
+
+Every previously hard-coded generator value is now a CLI argument with the same default, so behavior is unchanged unless overridden: object/bin friction, bin restitution, gravity, out-of-bin floor z, bin floor/wall thickness, camera sensor width and clip planes, Cycles samples, color-management view transform/look/exposure/gamma, object and bin material color/metallic/roughness, light type, and world color. All are recorded in the per-sample `settings` and the dataset summary.
+
+The generator's single intended input is a JSON preset: `--settings-file <preset>.json`, with any flag still able to override a key. `--samples 0` exports the preset (with `--export-settings`) and skips generation, so a complete template can be produced without running a simulation. Maintained presets: `configs/generator/k41144_progressive.json` and `configs/generator/bending_pipe_progressive.json`, both progressive, 30 objects, `object_friction 0.5` for denser piles.
+
+The GUI now runs the generator by writing all its settings to `.gui_generation_preset.json` and calling `--settings-file`, so a GUI run equals a CLI preset run. The Generation panel is split into groups: Model & Output, Cameras, Lighting & Render, Bin & Materials, Spawn & Drop, Physics & Rigid Body, Validation, Video, Actions.
+
+Density guidance: lower `object_friction` (0.2-0.4) lets parts slide into gaps for a denser bottom layer; combine with low restitution, `--no-progressive-freeze`, and more `final_relax_frames`. CONVEX_HULL still caps achievable density for concave parts (deferred fix E, V-HACD).
+
+### Grid Spawn Mode (2026-06-14)
+
+`--spawn-mode grid` generates tidy, ordered scenes instead of random piles: objects are placed at a fixed orientation in a row-major grid sized to the bin footprint, then settled per layer. Objects beyond one layer's capacity stack into further layers, each placed just above the settled pile below (reusing `pile_top_z`, the explosion watchdog, the recorder, and center-based out-of-bin). Orientation defaults to auto-flat (rotate the object's smallest bbox dimension to point down) and can be overridden with `--grid-orientation` euler degrees; `--grid-jitter` adds optional position/angle noise. Footprint and pitch come from the orientation-rotated bbox, so `cols/rows` adapt to each object. Verified: K41144 auto-flat `(0,0,0)` 7x2 single layer 12/12 in bin; bending_pipe auto-flat `(90,0,0)` 6x2 two layers 18/18 in bin; grid video and jitter render; progressive/delayed/batch unchanged. Maintained presets: `configs/generator/k41144_grid.json`, `configs/generator/bending_pipe_grid.json`.
+
 ## Part 2: Production Readiness Review
 
 ### Verdict

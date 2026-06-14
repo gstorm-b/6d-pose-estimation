@@ -37,6 +37,7 @@ If the task touches visualization, inspect:
 
 ```text
 scripts/view_point_cloud_open3d.py
+scripts/view_augmented_point_cloud.py
 scripts/dataset_gui.py
 scripts/view_ply_pyside_vtk.py
 ```

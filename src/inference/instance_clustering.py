@@ -27,6 +27,146 @@ class VotedCenterClusteringConfig:
 
 
 @dataclass(frozen=True)
+class TwoStageClusteringConfig:
+    """Stage-2 merge/split post-processing thresholds, all relative to diameter.
+
+    PS6D shows that stage-1 DBSCAN over-/under-segments elongated parts; stage 2
+    merges fragments of one object and splits clusters that span two objects.
+    """
+
+    enabled: bool = False
+    merge_center_fraction: float = 0.5       # merge if voted-center centroids within this * diameter
+    merge_contiguity_fraction: float = 0.25  # ...and nearest cross points within this * diameter
+    split_separation_fraction: float = 0.7   # split if 2-means voted-center separation > this * diameter
+    split_min_points: int = 32               # each split half must keep at least this many points
+    max_check_points: int = 200              # subsample per cluster for the contiguity test
+
+    @classmethod
+    def from_mapping(cls, value: dict[str, Any] | None) -> "TwoStageClusteringConfig":
+        config = value or {}
+        return cls(
+            enabled=bool(config.get("enabled", cls.enabled)),
+            merge_center_fraction=float(config.get("merge_center_fraction", cls.merge_center_fraction)),
+            merge_contiguity_fraction=float(config.get("merge_contiguity_fraction", cls.merge_contiguity_fraction)),
+            split_separation_fraction=float(config.get("split_separation_fraction", cls.split_separation_fraction)),
+            split_min_points=int(config.get("split_min_points", cls.split_min_points)),
+            max_check_points=int(config.get("max_check_points", cls.max_check_points)),
+        )
+
+
+def _compact_labels(labels: np.ndarray) -> np.ndarray:
+    out = np.zeros_like(labels)
+    next_id = 1
+    for old in sorted(int(v) for v in np.unique(labels) if int(v) > 0):
+        out[labels == old] = next_id
+        next_id += 1
+    return out
+
+
+def _subsample(points: np.ndarray, limit: int, rng: np.random.Generator) -> np.ndarray:
+    if points.shape[0] <= limit:
+        return points
+    return points[rng.choice(points.shape[0], size=limit, replace=False)]
+
+
+def _min_cross_distance(a: np.ndarray, b: np.ndarray) -> float:
+    diff = a[:, None, :] - b[None, :, :]
+    return float(np.sqrt(np.sum(diff * diff, axis=2)).min())
+
+
+def _split_clusters(
+    points_camera: np.ndarray,
+    voted_centers: np.ndarray,
+    labels: np.ndarray,
+    diameter_m: float,
+    config: TwoStageClusteringConfig,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    try:
+        from sklearn.cluster import KMeans
+    except Exception:  # noqa: BLE001 - without sklearn, skip splitting
+        return labels
+
+    labels = labels.copy()
+    separation_threshold = config.split_separation_fraction * max(diameter_m, 1e-8)
+    next_id = int(labels.max()) + 1 if labels.size else 1
+    for cluster_id in sorted(int(v) for v in np.unique(labels) if int(v) > 0):
+        mask = labels == cluster_id
+        centers = voted_centers[mask]
+        if centers.shape[0] < 2 * config.split_min_points:
+            continue
+        km = KMeans(n_clusters=2, n_init=3, random_state=0).fit(centers)
+        sub = km.labels_
+        separation = float(np.linalg.norm(km.cluster_centers_[0] - km.cluster_centers_[1]))
+        half_a = int(np.count_nonzero(sub == 0))
+        half_b = int(np.count_nonzero(sub == 1))
+        if separation > separation_threshold and min(half_a, half_b) >= config.split_min_points:
+            idx = np.flatnonzero(mask)
+            labels[idx[sub == 1]] = next_id
+            next_id += 1
+    return labels
+
+
+def _merge_clusters(
+    points_camera: np.ndarray,
+    voted_centers: np.ndarray,
+    labels: np.ndarray,
+    diameter_m: float,
+    config: TwoStageClusteringConfig,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    labels = labels.copy()
+    cluster_ids = sorted(int(v) for v in np.unique(labels) if int(v) > 0)
+    if len(cluster_ids) < 2:
+        return labels
+    centroids = {cid: voted_centers[labels == cid].mean(axis=0) for cid in cluster_ids}
+    cluster_points = {cid: _subsample(points_camera[labels == cid], config.max_check_points, rng) for cid in cluster_ids}
+
+    parent = {cid: cid for cid in cluster_ids}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    center_threshold = config.merge_center_fraction * max(diameter_m, 1e-8)
+    contiguity_threshold = config.merge_contiguity_fraction * max(diameter_m, 1e-8)
+    for i, ci in enumerate(cluster_ids):
+        for cj in cluster_ids[i + 1 :]:
+            if float(np.linalg.norm(centroids[ci] - centroids[cj])) > center_threshold:
+                continue
+            if _min_cross_distance(cluster_points[ci], cluster_points[cj]) <= contiguity_threshold:
+                parent[find(ci)] = find(cj)
+    for cid in cluster_ids:
+        labels[labels == cid] = find(cid)
+    return labels
+
+
+def refine_instance_labels_two_stage(
+    points_camera: np.ndarray,
+    voted_centers: np.ndarray,
+    instance_labels: np.ndarray,
+    diameter_m: float,
+    config: TwoStageClusteringConfig | dict[str, Any] | None,
+) -> np.ndarray:
+    """Apply stage-2 split-then-merge post-processing to stage-1 instance labels."""
+
+    cfg = config if isinstance(config, TwoStageClusteringConfig) else TwoStageClusteringConfig.from_mapping(config)
+    if not cfg.enabled:
+        return np.asarray(instance_labels, dtype=np.int64)
+    points = np.asarray(points_camera, dtype=np.float32)
+    centers = np.asarray(voted_centers, dtype=np.float32)
+    labels = np.asarray(instance_labels, dtype=np.int64).copy()
+    rng = np.random.default_rng(0)
+    if cfg.split_separation_fraction > 0:
+        labels = _split_clusters(points, centers, labels, diameter_m, cfg, rng)
+    if cfg.merge_center_fraction > 0:
+        labels = _merge_clusters(points, centers, labels, diameter_m, cfg, rng)
+    return _compact_labels(labels)
+
+
+@dataclass(frozen=True)
 class InstanceMetricConfig:
     instance_iou_threshold: float = 0.5
     ignore_gt_instances_below_points: int = 32

@@ -468,18 +468,17 @@ class DatasetGui(QMainWindow):
         dataset_layout.addRow("", dataset_buttons)
         layout.addWidget(dataset_group)
 
-        generation_group = QGroupBox("Generation")
-        form = QFormLayout(generation_group)
+        def add_form_group(title: str) -> QFormLayout:
+            box = QGroupBox(title)
+            box_form = QFormLayout(box)
+            layout.addWidget(box)
+            return box_form
 
         self.blender_path_edit = QLineEdit(BLENDER_DEFAULT)
         self.model_path_edit = QLineEdit("object-model/K41144.stl")
         self.class_name_edit = QLineEdit("K41144")
         self.class_name_edit.setPlaceholderText("Defaults to STL filename stem")
         self.output_path_edit = QLineEdit()
-        form.addRow("Blender", self._path_row(self.blender_path_edit, self.browse_blender))
-        form.addRow("Model", self._path_row(self.model_path_edit, self.browse_model))
-        form.addRow("Class name", self.class_name_edit)
-        form.addRow("Output", self._path_row(self.output_path_edit, self.browse_output))
 
         self.samples_spin = self._spin(1, 100000, 3)
         self.objects_spin = self._spin(1, 200, 30)
@@ -511,6 +510,25 @@ class DatasetGui(QMainWindow):
         self.progressive_settle_frames_spin.setToolTip("Progressive mode: frames each object falls and settles before being frozen.")
         self.final_relax_frames_spin = self._spin(0, 5000, 60)
         self.final_relax_frames_spin.setToolTip("Progressive mode: final all-active relaxation frames so the pile self-adjusts.")
+        self.progressive_freeze_check = QCheckBox("Freeze settled objects (progressive)")
+        self.progressive_freeze_check.setChecked(True)
+        self.progressive_freeze_check.setToolTip(
+            "On (default): freeze each object as a static collider once settled (faster). "
+            "Off: keep settled objects active so the pile keeps re-settling (slower, avoids objects frozen mid-fall / floating)."
+        )
+        # Grid mode: tidy rows/columns.
+        self.grid_spacing_spin = self._double_spin(0.0, 1.0, 0.005, 3, 0.001)
+        self.grid_spacing_spin.setToolTip("Grid mode: gap between objects in a row/column, in meters.")
+        self.grid_drop_clearance_spin = self._double_spin(0.0, 1.0, 0.005, 3, 0.001)
+        self.grid_drop_clearance_spin.setToolTip("Grid mode: height each object/layer is placed above the floor/pile before settling.")
+        self.grid_jitter_spin = self._double_spin(0.0, 1.0, 0.0, 3, 0.001)
+        self.grid_jitter_spin.setToolTip("Grid mode: random position (m) and angle (rad) jitter for variety. 0 = perfectly tidy.")
+        self.grid_layers_spin = self._spin(0, 100, 0)
+        self.grid_layers_spin.setToolTip("Grid mode: number of stacked layers. 0 = auto (enough layers for all objects).")
+        self.grid_auto_orientation_check = QCheckBox("Auto-flat orientation (grid)")
+        self.grid_auto_orientation_check.setChecked(True)
+        self.grid_auto_orientation_check.setToolTip("On: lay the object flattest automatically. Off: use the euler degrees below.")
+        self.grid_orientation_row, self.grid_orientation_spins = self._xyz_spins((0.0, 0.0, 0.0), minimum=-360.0, maximum=360.0, decimals=1, step=5.0)
         self.drop_height_min_spin = self._double_spin(0.001, 5.0, 0.12, 3, 0.01)
         self.drop_height_min_spin.setToolTip("delayed/batch modes only: minimum absolute drop height.")
         self.drop_height_max_spin = self._double_spin(0.001, 5.0, 0.34, 3, 0.01)
@@ -531,6 +549,44 @@ class DatasetGui(QMainWindow):
         self.min_visible_points_spin = self._spin(0, 10000000, 8000)
         self.max_sample_attempts_spin = self._spin(1, 1000, 12)
         self.settle_frames_spin = self._spin(1, 5000, 260)
+        # Newly exposed physics / material / camera / render parameters.
+        self.object_friction_spin = self._double_spin(0.0, 2.0, 0.85, 3, 0.05)
+        self.object_friction_spin.setToolTip("Object friction. Lower values let objects slide into gaps for a denser pile (try 0.2-0.4).")
+        self.object_mass_spin = self._double_spin(0.0001, 100.0, 0.08, 4, 0.01)
+        self.object_mass_spin.setToolTip("Rigid-body mass in kg per object.")
+        self.bin_friction_spin = self._double_spin(0.0, 2.0, 0.9, 3, 0.05)
+        self.bin_restitution_spin = self._double_spin(0.0, 1.0, 0.05, 3, 0.01)
+        self.bin_floor_thickness_spin = self._double_spin(0.001, 0.5, 0.01, 3, 0.001)
+        self.bin_wall_thickness_spin = self._double_spin(0.001, 0.5, 0.012, 3, 0.001)
+        self.bin_roughness_spin = self._double_spin(0.0, 1.0, 0.82, 3, 0.01)
+        self.gravity_spin = self._double_spin(-50.0, 0.0, -9.81, 3, 0.1)
+        self.gravity_spin.setToolTip("World gravity along z (m/s^2).")
+        self.physics_substeps_spin = self._spin(1, 1000, 60)
+        self.physics_substeps_spin.setToolTip("Rigid-body substeps per frame. Higher reduces penetration and tunneling.")
+        self.physics_solver_iterations_spin = self._spin(1, 1000, 30)
+        self.out_of_bin_min_z_spin = self._double_spin(-1.0, 0.0, -0.04, 3, 0.01)
+        self.out_of_bin_tolerance_spin = self._double_spin(0.0, 1.0, 0.015, 3, 0.005)
+        self.camera_sensor_width_spin = self._double_spin(1.0, 200.0, 32.0, 2, 1.0)
+        self.camera_clip_start_spin = self._double_spin(0.001, 10.0, 0.01, 3, 0.001)
+        self.camera_clip_end_spin = self._double_spin(0.1, 100.0, 1.5, 2, 0.1)
+        self.cycles_samples_spin = self._spin(1, 8192, 48)
+        self.view_exposure_spin = self._double_spin(-10.0, 10.0, -1.2, 2, 0.1)
+        self.view_gamma_spin = self._double_spin(0.0, 5.0, 1.0, 2, 0.1)
+        self.object_metallic_spin = self._double_spin(0.0, 1.0, 0.85, 3, 0.01)
+        self.object_roughness_spin = self._double_spin(0.0, 1.0, 0.85, 3, 0.01)
+        self.object_color_row, self.object_color_spins = self._xyz_spins((0.015, 0.014, 0.013), minimum=0.0, maximum=1.0)
+        self.bin_color_row, self.bin_color_spins = self._xyz_spins((0.12, 0.12, 0.115), minimum=0.0, maximum=1.0)
+        self.world_color_row, self.world_color_spins = self._xyz_spins((0.018, 0.018, 0.02), minimum=0.0, maximum=1.0)
+        self.view_transform_combo = QComboBox()
+        self.view_transform_combo.addItems(["Filmic", "Standard", "AgX", "Raw"])
+        self.view_look_combo = QComboBox()
+        self.view_look_combo.addItems([
+            "None", "Very Low Contrast", "Low Contrast", "Medium Low Contrast",
+            "Medium Contrast", "Medium High Contrast", "High Contrast", "Very High Contrast",
+        ])
+        self.view_look_combo.setCurrentText("Medium High Contrast")
+        self.light_type_combo = QComboBox()
+        self.light_type_combo.addItems(["AREA", "SUN", "POINT", "SPOT"])
         self.record_video_check = QCheckBox("Record simulation video")
         self.record_video_check.setChecked(False)
         self.record_video_check.setToolTip("Write an MP4 preview of the accepted sample's drop/settle animation.")
@@ -542,7 +598,7 @@ class DatasetGui(QMainWindow):
         self.video_fps_spin = self._spin(1, 120, 24)
 
         self.spawn_mode_combo = QComboBox()
-        self.spawn_mode_combo.addItems(["progressive", "delayed", "batch"])
+        self.spawn_mode_combo.addItems(["progressive", "grid", "delayed", "batch"])
         self.spawn_mode_combo.setToolTip(
             "progressive: drop one object at a time onto the pile (fewest out-of-bin ejections). "
             "delayed/batch: legacy modes using absolute drop heights and spawn settle frames."
@@ -557,52 +613,105 @@ class DatasetGui(QMainWindow):
             "Debug-only mode. Leave unchecked for training data so out-of-bin attempts are rejected."
         )
 
-        form.addRow("Samples", self.samples_spin)
-        form.addRow("Objects", self.objects_spin)
-        form.addRow("Width", self.width_spin)
-        form.addRow("Height", self.height_spin)
-        form.addRow("Model scale", self.model_scale_spin)
-        form.addRow("Depth cam XYZ", self.depth_camera_location_row)
-        form.addRow("Depth target XYZ", self.depth_camera_target_row)
-        form.addRow("Depth lens", self.depth_camera_lens_spin)
-        form.addRow("RGB cam XYZ", self.rgb_camera_location_row)
-        form.addRow("RGB target XYZ", self.rgb_camera_target_row)
-        form.addRow("RGB lens", self.rgb_camera_lens_spin)
-        form.addRow("Debug cam XYZ", self.debug_camera_location_row)
-        form.addRow("Debug target XYZ", self.debug_camera_target_row)
-        form.addRow("Debug lens", self.debug_camera_lens_spin)
-        form.addRow("Light XYZ", self.light_location_row)
-        form.addRow("Light energy", self.light_energy_spin)
-        form.addRow("Light size", self.light_size_spin)
-        form.addRow("Bin X", self.bin_x_spin)
-        form.addRow("Bin Y", self.bin_y_spin)
-        form.addRow("Wall height", self.bin_wall_height_spin)
-        form.addRow("Spawn mode", self.spawn_mode_combo)
-        form.addRow("Drop clearance min", self.drop_clearance_min_spin)
-        form.addRow("Drop clearance max", self.drop_clearance_max_spin)
-        form.addRow("Progressive settle frames", self.progressive_settle_frames_spin)
-        form.addRow("Final relax frames", self.final_relax_frames_spin)
-        form.addRow("Drop min (legacy)", self.drop_height_min_spin)
-        form.addRow("Drop max (legacy)", self.drop_height_max_spin)
-        form.addRow("Spawn", self.spawn_strategy_combo)
-        form.addRow("Objects/layer", self.objects_per_layer_spin)
-        form.addRow("Spawn min dist", self.spawn_min_distance_spin)
-        form.addRow("Spawn settle frames (legacy)", self.spawn_settle_frames_spin)
-        form.addRow("Collision margin", self.collision_margin_spin)
-        form.addRow("Collision shape", self.collision_shape_combo)
-        form.addRow("Object bounce", self.object_restitution_spin)
-        form.addRow("Linear damping", self.object_linear_damping_spin)
-        form.addRow("Angular damping", self.object_angular_damping_spin)
-        form.addRow("Min visible objects", self.min_visible_objects_spin)
-        form.addRow("Min visible points", self.min_visible_points_spin)
-        form.addRow("Max attempts", self.max_sample_attempts_spin)
-        form.addRow("Settle frames (legacy)", self.settle_frames_spin)
-        form.addRow("Video", self.record_video_check)
-        form.addRow("Failed video", self.record_failed_video_check)
-        form.addRow("Video frame step", self.video_frame_step_spin)
-        form.addRow("Video FPS", self.video_fps_spin)
-        form.addRow("Out-of-bin", self.allow_out_of_bin_filtering_check)
+        model_form = add_form_group("Model & Output")
+        model_form.addRow("Blender", self._path_row(self.blender_path_edit, self.browse_blender))
+        model_form.addRow("Model", self._path_row(self.model_path_edit, self.browse_model))
+        model_form.addRow("Class name", self.class_name_edit)
+        model_form.addRow("Output", self._path_row(self.output_path_edit, self.browse_output))
+        model_form.addRow("Samples", self.samples_spin)
+        model_form.addRow("Objects", self.objects_spin)
+        model_form.addRow("Width", self.width_spin)
+        model_form.addRow("Height", self.height_spin)
+        model_form.addRow("Model scale", self.model_scale_spin)
 
+        cam_form = add_form_group("Cameras")
+        cam_form.addRow("Depth cam XYZ", self.depth_camera_location_row)
+        cam_form.addRow("Depth target XYZ", self.depth_camera_target_row)
+        cam_form.addRow("Depth lens", self.depth_camera_lens_spin)
+        cam_form.addRow("RGB cam XYZ", self.rgb_camera_location_row)
+        cam_form.addRow("RGB target XYZ", self.rgb_camera_target_row)
+        cam_form.addRow("RGB lens", self.rgb_camera_lens_spin)
+        cam_form.addRow("Debug cam XYZ", self.debug_camera_location_row)
+        cam_form.addRow("Debug target XYZ", self.debug_camera_target_row)
+        cam_form.addRow("Debug lens", self.debug_camera_lens_spin)
+        cam_form.addRow("Sensor width (mm)", self.camera_sensor_width_spin)
+        cam_form.addRow("Clip start", self.camera_clip_start_spin)
+        cam_form.addRow("Clip end", self.camera_clip_end_spin)
+
+        light_form = add_form_group("Lighting & Render")
+        light_form.addRow("Light XYZ", self.light_location_row)
+        light_form.addRow("Light type", self.light_type_combo)
+        light_form.addRow("Light energy", self.light_energy_spin)
+        light_form.addRow("Light size", self.light_size_spin)
+        light_form.addRow("World color RGB", self.world_color_row)
+        light_form.addRow("Cycles samples", self.cycles_samples_spin)
+        light_form.addRow("View transform", self.view_transform_combo)
+        light_form.addRow("View look", self.view_look_combo)
+        light_form.addRow("Exposure", self.view_exposure_spin)
+        light_form.addRow("Gamma", self.view_gamma_spin)
+
+        bin_form = add_form_group("Bin & Materials")
+        bin_form.addRow("Bin X", self.bin_x_spin)
+        bin_form.addRow("Bin Y", self.bin_y_spin)
+        bin_form.addRow("Wall height", self.bin_wall_height_spin)
+        bin_form.addRow("Floor thickness", self.bin_floor_thickness_spin)
+        bin_form.addRow("Wall thickness", self.bin_wall_thickness_spin)
+        bin_form.addRow("Bin color RGB", self.bin_color_row)
+        bin_form.addRow("Bin roughness", self.bin_roughness_spin)
+        bin_form.addRow("Bin friction", self.bin_friction_spin)
+        bin_form.addRow("Bin restitution", self.bin_restitution_spin)
+        bin_form.addRow("Object color RGB", self.object_color_row)
+        bin_form.addRow("Object metallic", self.object_metallic_spin)
+        bin_form.addRow("Object roughness", self.object_roughness_spin)
+
+        spawn_form = add_form_group("Spawn & Drop")
+        spawn_form.addRow("Spawn mode", self.spawn_mode_combo)
+        spawn_form.addRow("Drop clearance min", self.drop_clearance_min_spin)
+        spawn_form.addRow("Drop clearance max", self.drop_clearance_max_spin)
+        spawn_form.addRow("Progressive settle frames", self.progressive_settle_frames_spin)
+        spawn_form.addRow("Final relax frames", self.final_relax_frames_spin)
+        spawn_form.addRow("Freeze settled", self.progressive_freeze_check)
+        spawn_form.addRow("Grid spacing", self.grid_spacing_spin)
+        spawn_form.addRow("Grid drop clearance", self.grid_drop_clearance_spin)
+        spawn_form.addRow("Grid jitter", self.grid_jitter_spin)
+        spawn_form.addRow("Grid layers (0=auto)", self.grid_layers_spin)
+        spawn_form.addRow("Grid auto-flat", self.grid_auto_orientation_check)
+        spawn_form.addRow("Grid orientation deg", self.grid_orientation_row)
+        spawn_form.addRow("Drop min (legacy)", self.drop_height_min_spin)
+        spawn_form.addRow("Drop max (legacy)", self.drop_height_max_spin)
+        spawn_form.addRow("Spawn strategy (legacy)", self.spawn_strategy_combo)
+        spawn_form.addRow("Objects/layer (legacy)", self.objects_per_layer_spin)
+        spawn_form.addRow("Spawn min dist (legacy)", self.spawn_min_distance_spin)
+        spawn_form.addRow("Spawn settle frames (legacy)", self.spawn_settle_frames_spin)
+        spawn_form.addRow("Settle frames (legacy)", self.settle_frames_spin)
+
+        physics_form = add_form_group("Physics & Rigid Body")
+        physics_form.addRow("Gravity", self.gravity_spin)
+        physics_form.addRow("Substeps/frame", self.physics_substeps_spin)
+        physics_form.addRow("Solver iterations", self.physics_solver_iterations_spin)
+        physics_form.addRow("Collision margin", self.collision_margin_spin)
+        physics_form.addRow("Collision shape", self.collision_shape_combo)
+        physics_form.addRow("Object mass", self.object_mass_spin)
+        physics_form.addRow("Object friction", self.object_friction_spin)
+        physics_form.addRow("Object bounce", self.object_restitution_spin)
+        physics_form.addRow("Linear damping", self.object_linear_damping_spin)
+        physics_form.addRow("Angular damping", self.object_angular_damping_spin)
+
+        valid_form = add_form_group("Validation")
+        valid_form.addRow("Min visible objects", self.min_visible_objects_spin)
+        valid_form.addRow("Min visible points", self.min_visible_points_spin)
+        valid_form.addRow("Max attempts", self.max_sample_attempts_spin)
+        valid_form.addRow("Out-of-bin tolerance", self.out_of_bin_tolerance_spin)
+        valid_form.addRow("Out-of-bin min z", self.out_of_bin_min_z_spin)
+        valid_form.addRow("Legacy filter out-of-bin", self.allow_out_of_bin_filtering_check)
+
+        video_form = add_form_group("Video")
+        video_form.addRow("Record video", self.record_video_check)
+        video_form.addRow("Record failed video", self.record_failed_video_check)
+        video_form.addRow("Video frame step", self.video_frame_step_spin)
+        video_form.addRow("Video FPS", self.video_fps_spin)
+
+        actions_form = add_form_group("Actions")
         preset_actions = QHBoxLayout()
         import_preset_button = QPushButton("Import Preset")
         import_preset_button.clicked.connect(self.import_generation_settings)
@@ -610,7 +719,7 @@ class DatasetGui(QMainWindow):
         export_preset_button.clicked.connect(self.export_generation_settings)
         preset_actions.addWidget(import_preset_button)
         preset_actions.addWidget(export_preset_button)
-        form.addRow("Preset", preset_actions)
+        actions_form.addRow("Preset", preset_actions)
 
         self.start_button = QPushButton("Start Generation")
         self.start_button.clicked.connect(self.start_generation)
@@ -623,8 +732,7 @@ class DatasetGui(QMainWindow):
         actions.addWidget(self.start_button)
         actions.addWidget(self.single_sample_video_button)
         actions.addWidget(self.stop_button)
-        form.addRow("", actions)
-        layout.addWidget(generation_group)
+        actions_form.addRow("", actions)
 
         layout.addStretch(1)
         scroll = QScrollArea()
@@ -899,6 +1007,12 @@ class DatasetGui(QMainWindow):
             "drop_clearance_max": self.drop_clearance_max_spin.value(),
             "progressive_settle_frames": self.progressive_settle_frames_spin.value(),
             "final_relax_frames": self.final_relax_frames_spin.value(),
+            "progressive_freeze": self.progressive_freeze_check.isChecked(),
+            "grid_spacing": self.grid_spacing_spin.value(),
+            "grid_drop_clearance": self.grid_drop_clearance_spin.value(),
+            "grid_jitter": self.grid_jitter_spin.value(),
+            "grid_layers": self.grid_layers_spin.value(),
+            "grid_orientation": None if self.grid_auto_orientation_check.isChecked() else self._xyz_values(self.grid_orientation_spins),
             "drop_height_min": self.drop_height_min_spin.value(),
             "drop_height_max": self.drop_height_max_spin.value(),
             "spawn_strategy": self.spawn_strategy_combo.currentText(),
@@ -907,12 +1021,38 @@ class DatasetGui(QMainWindow):
             "spawn_settle_frames": self.spawn_settle_frames_spin.value(),
             "collision_margin": self.collision_margin_spin.value(),
             "collision_shape": self.collision_shape_combo.currentText(),
+            "object_mass": self.object_mass_spin.value(),
+            "object_friction": self.object_friction_spin.value(),
             "object_restitution": self.object_restitution_spin.value(),
             "object_linear_damping": self.object_linear_damping_spin.value(),
             "object_angular_damping": self.object_angular_damping_spin.value(),
+            "object_color": self._xyz_values(self.object_color_spins),
+            "object_metallic": self.object_metallic_spin.value(),
+            "object_roughness": self.object_roughness_spin.value(),
+            "bin_friction": self.bin_friction_spin.value(),
+            "bin_restitution": self.bin_restitution_spin.value(),
+            "bin_floor_thickness": self.bin_floor_thickness_spin.value(),
+            "bin_wall_thickness": self.bin_wall_thickness_spin.value(),
+            "bin_color": self._xyz_values(self.bin_color_spins),
+            "bin_roughness": self.bin_roughness_spin.value(),
+            "gravity": self.gravity_spin.value(),
+            "physics_substeps": self.physics_substeps_spin.value(),
+            "physics_solver_iterations": self.physics_solver_iterations_spin.value(),
+            "camera_sensor_width": self.camera_sensor_width_spin.value(),
+            "camera_clip_start": self.camera_clip_start_spin.value(),
+            "camera_clip_end": self.camera_clip_end_spin.value(),
+            "cycles_samples": self.cycles_samples_spin.value(),
+            "view_transform": self.view_transform_combo.currentText(),
+            "view_look": self.view_look_combo.currentText(),
+            "view_exposure": self.view_exposure_spin.value(),
+            "view_gamma": self.view_gamma_spin.value(),
+            "light_type": self.light_type_combo.currentText(),
+            "world_color": self._xyz_values(self.world_color_spins),
             "min_visible_objects": self.min_visible_objects_spin.value(),
             "min_visible_points": self.min_visible_points_spin.value(),
             "max_sample_attempts": self.max_sample_attempts_spin.value(),
+            "out_of_bin_tolerance": self.out_of_bin_tolerance_spin.value(),
+            "out_of_bin_min_z": self.out_of_bin_min_z_spin.value(),
             "settle_frames": self.settle_frames_spin.value(),
             "record_simulation_video": self.record_video_check.isChecked(),
             "record_failed_video": self.record_failed_video_check.isChecked(),
@@ -936,10 +1076,14 @@ class DatasetGui(QMainWindow):
             "spawn_settle_frames": self.spawn_settle_frames_spin,
             "progressive_settle_frames": self.progressive_settle_frames_spin,
             "final_relax_frames": self.final_relax_frames_spin,
+            "grid_layers": self.grid_layers_spin,
             "min_visible_objects": self.min_visible_objects_spin,
             "min_visible_points": self.min_visible_points_spin,
             "max_sample_attempts": self.max_sample_attempts_spin,
             "settle_frames": self.settle_frames_spin,
+            "physics_substeps": self.physics_substeps_spin,
+            "physics_solver_iterations": self.physics_solver_iterations_spin,
+            "cycles_samples": self.cycles_samples_spin,
             "simulation_video_frame_step": self.video_frame_step_spin,
             "simulation_video_fps": self.video_fps_spin,
         }
@@ -948,20 +1092,40 @@ class DatasetGui(QMainWindow):
             "depth_camera_lens": self.depth_camera_lens_spin,
             "rgb_camera_lens": self.rgb_camera_lens_spin,
             "debug_camera_lens": self.debug_camera_lens_spin,
+            "camera_sensor_width": self.camera_sensor_width_spin,
+            "camera_clip_start": self.camera_clip_start_spin,
+            "camera_clip_end": self.camera_clip_end_spin,
+            "view_exposure": self.view_exposure_spin,
+            "view_gamma": self.view_gamma_spin,
             "light_energy": self.light_energy_spin,
             "light_size": self.light_size_spin,
             "bin_x": self.bin_x_spin,
             "bin_y": self.bin_y_spin,
             "bin_wall_height": self.bin_wall_height_spin,
+            "bin_floor_thickness": self.bin_floor_thickness_spin,
+            "bin_wall_thickness": self.bin_wall_thickness_spin,
+            "bin_roughness": self.bin_roughness_spin,
+            "bin_friction": self.bin_friction_spin,
+            "bin_restitution": self.bin_restitution_spin,
             "drop_clearance_min": self.drop_clearance_min_spin,
             "drop_clearance_max": self.drop_clearance_max_spin,
+            "grid_spacing": self.grid_spacing_spin,
+            "grid_drop_clearance": self.grid_drop_clearance_spin,
+            "grid_jitter": self.grid_jitter_spin,
             "drop_height_min": self.drop_height_min_spin,
             "drop_height_max": self.drop_height_max_spin,
             "spawn_min_distance": self.spawn_min_distance_spin,
             "collision_margin": self.collision_margin_spin,
+            "gravity": self.gravity_spin,
+            "out_of_bin_tolerance": self.out_of_bin_tolerance_spin,
+            "out_of_bin_min_z": self.out_of_bin_min_z_spin,
+            "object_mass": self.object_mass_spin,
+            "object_friction": self.object_friction_spin,
             "object_restitution": self.object_restitution_spin,
             "object_linear_damping": self.object_linear_damping_spin,
             "object_angular_damping": self.object_angular_damping_spin,
+            "object_metallic": self.object_metallic_spin,
+            "object_roughness": self.object_roughness_spin,
         }
         xyz_spins = {
             "depth_camera_location": self.depth_camera_location_spins,
@@ -971,6 +1135,9 @@ class DatasetGui(QMainWindow):
             "debug_camera_location": self.debug_camera_location_spins,
             "debug_camera_target": self.debug_camera_target_spins,
             "light_location": self.light_location_spins,
+            "object_color": self.object_color_spins,
+            "bin_color": self.bin_color_spins,
+            "world_color": self.world_color_spins,
         }
 
         for key, edit in line_edits.items():
@@ -991,12 +1158,26 @@ class DatasetGui(QMainWindow):
             self.spawn_strategy_combo.setCurrentText(str(settings["spawn_strategy"]))
         if "collision_shape" in settings:
             self.collision_shape_combo.setCurrentText(str(settings["collision_shape"]))
+        if "view_transform" in settings:
+            self.view_transform_combo.setCurrentText(str(settings["view_transform"]))
+        if "view_look" in settings:
+            self.view_look_combo.setCurrentText(str(settings["view_look"]))
+        if "light_type" in settings:
+            self.light_type_combo.setCurrentText(str(settings["light_type"]))
         if "allow_out_of_bin_filtering" in settings:
             self.allow_out_of_bin_filtering_check.setChecked(bool(settings["allow_out_of_bin_filtering"]))
         if "record_simulation_video" in settings:
             self.record_video_check.setChecked(bool(settings["record_simulation_video"]))
         if "record_failed_video" in settings:
             self.record_failed_video_check.setChecked(bool(settings["record_failed_video"]))
+        if "progressive_freeze" in settings:
+            self.progressive_freeze_check.setChecked(bool(settings["progressive_freeze"]))
+        if "grid_orientation" in settings:
+            grid_orientation = settings["grid_orientation"]
+            auto = grid_orientation is None
+            self.grid_auto_orientation_check.setChecked(auto)
+            if not auto:
+                self._set_xyz_values(self.grid_orientation_spins, grid_orientation)
 
     def import_generation_settings(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Import generator preset", str(PROJECT_ROOT), "JSON files (*.json);;All files (*)")
@@ -1349,8 +1530,12 @@ class DatasetGui(QMainWindow):
         self.process.start()
 
     def estimated_simulation_frames(self) -> int:
-        if self.spawn_mode_combo.currentText() == "progressive":
+        mode = self.spawn_mode_combo.currentText()
+        if mode == "progressive":
             return self.objects_spin.value() * max(1, self.progressive_settle_frames_spin.value()) + max(0, self.final_relax_frames_spin.value())
+        if mode == "grid":
+            approx_layers = max(1, (self.objects_spin.value() + 7) // 8)
+            return approx_layers * max(1, self.progressive_settle_frames_spin.value()) + max(0, self.final_relax_frames_spin.value())
         spawn_settle_frames = self.spawn_settle_frames_spin.value()
         if spawn_settle_frames <= 0:
             return self.settle_frames_spin.value()
@@ -1364,98 +1549,34 @@ class DatasetGui(QMainWindow):
         force_record_video: bool = False,
         override_video_frame_step: int | None = None,
     ) -> list[str]:
-        args = [
+        """Write the full GUI settings to a JSON preset and run the generator with it.
+
+        The generator's single input is the JSON preset, so every parameter the GUI
+        exposes is passed through `--settings-file` instead of a long flag list.
+        """
+
+        settings = self.generation_settings()
+        settings["output"] = self._display_path(output_path)
+        if override_samples is not None:
+            settings["samples"] = int(override_samples)
+        if force_record_video:
+            settings["record_simulation_video"] = True
+        if override_video_frame_step is not None:
+            settings["simulation_video_frame_step"] = int(override_video_frame_step)
+        if not str(settings.get("class_name", "")).strip():
+            # Empty class name: let the generator default it to the STL stem.
+            settings.pop("class_name", None)
+
+        preset_path = PROJECT_ROOT / ".gui_generation_preset.json"
+        preset_path.write_text(json.dumps(settings, indent=2, sort_keys=True), encoding="utf-8")
+        return [
             "--background",
             "--python",
             str(GENERATOR_SCRIPT),
             "--",
-            "--model",
-            self.model_path_edit.text(),
-            "--model-scale",
-            str(self.model_scale_spin.value()),
-            "--output",
-            self._display_path(output_path),
-            "--samples",
-            str(override_samples if override_samples is not None else self.samples_spin.value()),
-            "--objects",
-            str(self.objects_spin.value()),
-            "--width",
-            str(self.width_spin.value()),
-            "--height",
-            str(self.height_spin.value()),
-            "--bin-x",
-            str(self.bin_x_spin.value()),
-            "--bin-y",
-            str(self.bin_y_spin.value()),
-            "--bin-wall-height",
-            str(self.bin_wall_height_spin.value()),
-            "--spawn-mode",
-            self.spawn_mode_combo.currentText(),
-            "--drop-clearance-min",
-            str(self.drop_clearance_min_spin.value()),
-            "--drop-clearance-max",
-            str(self.drop_clearance_max_spin.value()),
-            "--progressive-settle-frames",
-            str(self.progressive_settle_frames_spin.value()),
-            "--final-relax-frames",
-            str(self.final_relax_frames_spin.value()),
-            "--drop-height-min",
-            str(self.drop_height_min_spin.value()),
-            "--drop-height-max",
-            str(self.drop_height_max_spin.value()),
-            "--spawn-strategy",
-            self.spawn_strategy_combo.currentText(),
-            "--objects-per-layer",
-            str(self.objects_per_layer_spin.value()),
-            "--spawn-min-distance",
-            str(self.spawn_min_distance_spin.value()),
-            "--spawn-settle-frames",
-            str(self.spawn_settle_frames_spin.value()),
-            "--collision-margin",
-            str(self.collision_margin_spin.value()),
-            "--collision-shape",
-            self.collision_shape_combo.currentText(),
-            "--object-restitution",
-            str(self.object_restitution_spin.value()),
-            "--object-linear-damping",
-            str(self.object_linear_damping_spin.value()),
-            "--object-angular-damping",
-            str(self.object_angular_damping_spin.value()),
-            "--min-visible-objects",
-            str(self.min_visible_objects_spin.value()),
-            "--min-visible-points",
-            str(self.min_visible_points_spin.value()),
-            "--max-sample-attempts",
-            str(self.max_sample_attempts_spin.value()),
-            "--settle-frames",
-            str(self.settle_frames_spin.value()),
+            "--settings-file",
+            self._display_path(preset_path),
         ]
-        self._extend_xyz_arg(args, "--depth-camera-location", self.depth_camera_location_spins)
-        self._extend_xyz_arg(args, "--depth-camera-target", self.depth_camera_target_spins)
-        args.extend(["--depth-camera-lens", str(self.depth_camera_lens_spin.value())])
-        self._extend_xyz_arg(args, "--rgb-camera-location", self.rgb_camera_location_spins)
-        self._extend_xyz_arg(args, "--rgb-camera-target", self.rgb_camera_target_spins)
-        args.extend(["--rgb-camera-lens", str(self.rgb_camera_lens_spin.value())])
-        self._extend_xyz_arg(args, "--debug-camera-location", self.debug_camera_location_spins)
-        self._extend_xyz_arg(args, "--debug-camera-target", self.debug_camera_target_spins)
-        args.extend(["--debug-camera-lens", str(self.debug_camera_lens_spin.value())])
-        self._extend_xyz_arg(args, "--light-location", self.light_location_spins)
-        args.extend(["--light-energy", str(self.light_energy_spin.value())])
-        args.extend(["--light-size", str(self.light_size_spin.value())])
-        class_name = self.class_name_edit.text().strip()
-        if class_name:
-            args.extend(["--class-name", class_name])
-        if self.record_video_check.isChecked() or force_record_video:
-            args.append("--record-simulation-video")
-        if self.record_failed_video_check.isChecked():
-            args.append("--record-failed-video")
-        if self.record_video_check.isChecked() or force_record_video or self.record_failed_video_check.isChecked():
-            video_frame_step = override_video_frame_step if override_video_frame_step is not None else self.video_frame_step_spin.value()
-            args.extend(["--simulation-video-frame-step", str(video_frame_step)])
-            args.extend(["--simulation-video-fps", str(self.video_fps_spin.value())])
-        if self.allow_out_of_bin_filtering_check.isChecked():
-            args.append("--allow-out-of-bin-filtering")
-        return args
 
     def on_process_output(self) -> None:
         if not self.process:

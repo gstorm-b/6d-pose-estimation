@@ -100,8 +100,10 @@ Purpose:
 - Recenter mesh for correct physics.
 - Create a bin/container.
 - Spawn many copies of the object.
-- Run Blender rigid-body simulation. `--spawn-mode` selects how objects enter the scene: `progressive` (default), `delayed`, or `batch`.
+- Run Blender rigid-body simulation. `--spawn-mode` selects how objects enter the scene: `progressive` (default), `grid`, `delayed`, or `batch`.
+- `grid` (tidy rows/columns): place objects at a fixed orientation in a row-major grid sized to the bin footprint, then settle per layer. Objects beyond one layer's capacity stack into further layers (each layer placed just above the settled pile below it). Orientation defaults to auto-flat (the object's smallest dimension points down) and can be overridden with `--grid-orientation` euler degrees. `--grid-jitter` adds optional small position/angle noise for variety while staying tidy. Reuses the per-layer settle window (`--progressive-settle-frames`), `--final-relax-frames`, and the freeze toggle. Use this mode to generate orderly, structured scenes instead of random piles.
 - `progressive` (PyBullet-style, recommended): drop one object at a time from `pile_top + bounding_radius + random(drop_clearance_min, drop_clearance_max)`, settle it, freeze it as a passive collider at its settled pose, then drop the next; a final all-active relaxation lets the pile self-adjust. Only one active body simulates per stage, so there are no mid-air collisions and impact energy stays low, which nearly eliminates out-of-bin ejections. Baked poses are read from the evaluated object, not basis `matrix_world`.
+- Progressive freeze can be disabled with `--no-progressive-freeze`: settled objects stay ACTIVE and the whole pile re-settles each stage, so an object whose settle window was too short is never frozen mid-fall and left floating. This is slower (all active bodies re-simulate per stage) but produces tighter piles. Measured example (12 settle frames, no final relax, K41144): freeze on pile top 67.1 mm vs off 57.7 mm.
 - `delayed` (legacy `--spawn-settle-frames > 0`): each object's rigid body stays disabled until its scheduled `spawn_frame`. Pending objects wait parked far outside the bin and are keyframe-teleported to their drop position 3 frames before activation, because disabled rigid bodies remain static colliders in Bullet.
 - `batch`/`delayed`: when spawns coexist, drop positions enforce a hard 3D separation of `2 * bounding_radius + max(collision_margin, 0.0005)` and lift candidates upward instead of silently accepting overlaps.
 - A physics explosion watchdog estimates per-object speed every frame and rejects the attempt early with `reason="physics_explosion"` when any activated object exceeds the speed limit or leaves the vertical sanity band.
@@ -138,21 +140,38 @@ Important generator options:
 - `--spawn-strategy layered`: spreads initial objects into height bands to avoid explosive overlaps.
 - `--objects-per-layer`: number of objects per initial height band.
 - `--spawn-settle-frames`: default `35`. If greater than zero, each object receives a scheduled `spawn_frame` separated by this many frames. Objects are hidden and rigid-body-disabled before their spawn frame, then become active; earlier objects remain active, so the pile can keep adjusting while later objects fall. Use `0` only when intentionally reverting to batch-active behavior for comparison.
-- `--spawn-mode`: `progressive` (default), `delayed`, or `batch`. See the simulation notes above.
+- `--spawn-mode`: `progressive` (default), `grid`, `delayed`, or `batch`. See the simulation notes above.
+- `--grid-spacing`: grid mode gap between objects in a row/column, in meters. Default `0.005`.
+- `--grid-drop-clearance`: grid mode height each object/layer is placed above the floor/pile before settling. Default `0.005`.
+- `--grid-jitter`: grid mode random position (m) and angle (rad) jitter for variety. Default `0.0` (perfectly tidy).
+- `--grid-orientation`: grid mode object orientation as XYZ euler degrees. Omit for auto-flat (smallest dimension down).
+- `--grid-layers`: grid mode number of stacked layers. `0` = auto (enough layers for all objects).
 - `--drop-clearance-min`, `--drop-clearance-max`: progressive mode drop height above the current pile top, in meters. Defaults `0.03`/`0.12`. The bounding radius is added automatically.
-- `--progressive-settle-frames`: progressive mode frames per object to fall and settle. Default `45`.
+- `--progressive-settle-frames`: progressive mode frames per object to fall and settle. Default `45`. Raise it if objects freeze before they settle.
 - `--final-relax-frames`: progressive mode final all-active relaxation frames. Default `60`.
+- `--progressive-freeze` / `--no-progressive-freeze`: freeze each settled object as a static collider (default, faster) or keep all objects active so the pile keeps re-settling (slower, avoids mid-fall freezing / floating).
 - `--drop-height-min`, `--drop-height-max`: random absolute spawn height range for `delayed`/`batch` modes only.
 - `--record-failed-video`: also render an MP4 of each rejected attempt into `<output>/rejected/`.
 - `--collision-margin`: rigid-body margin in meters. Current recommended value is `0.0005` (0.5 mm). The old `0.00002` value was below what Bullet handles robustly and contributed to deep-penetration impulses and wall tunneling.
 - `--object-restitution`: rigid-body bounce/restitution for spawned objects. Lower values reduce rebounds.
 - `--object-mass`: rigid-body mass in kg. Default `0.08`.
+- `--object-friction`: object rigid-body friction. Default `0.85`. Lower values (try `0.2`-`0.4`) let objects slide into gaps for a denser pile.
 - `--object-linear-damping`: default `0.05`. The old hard-coded `0.35` made free fall unrealistically slow.
 - `--object-angular-damping`: default `0.15` (old hard-coded value was `0.45`).
+- `--bin-friction`, `--bin-restitution`: friction/restitution of the bin floor and walls. Defaults `0.9` / `0.05`.
+- `--gravity`: world gravity along z. Default `-9.81`.
 - `--physics-substeps`: rigid-body world substeps per frame. Default `60` (old hard-coded value was `20`); higher values reduce penetration depth and tunneling.
 - `--physics-solver-iterations`: constraint solver iterations. Default `30`.
 - `--explosion-speed-limit`: watchdog speed limit in m/s. Omit for an automatic limit `max(4.0, 1.5 * sqrt(2 g h_max))`; `0` disables the watchdog.
-- `--out-of-bin-tolerance`: tolerance around bin x/y bounds for post-physics world-bbox checks.
+- `--bin-floor-thickness`, `--bin-wall-thickness`: bin geometry in meters. Defaults `0.01` / `0.012`.
+- `--object-color`, `--object-metallic`, `--object-roughness`: object material. Defaults `(0.015,0.014,0.013)` / `0.85` / `0.85`.
+- `--bin-color`, `--bin-roughness`: bin material. Defaults `(0.12,0.12,0.115)` / `0.82`.
+- `--world-color`: world background color. Default `(0.018,0.018,0.02)`.
+- `--light-type`: `AREA` (default), `SUN`, `POINT`, or `SPOT`.
+- `--camera-sensor-width`, `--camera-clip-start`, `--camera-clip-end`: shared camera optics. Defaults `32.0` / `0.01` / `1.50`.
+- `--cycles-samples`, `--view-transform`, `--view-look`, `--view-exposure`, `--view-gamma`: Cycles render and color management. Defaults `48` / `Filmic` / `Medium High Contrast` / `-1.2` / `1.0`.
+- `--out-of-bin-tolerance`: tolerance around bin x/y bounds for the post-physics center check.
+- `--out-of-bin-min-z`: lowest world z an object may reach before it counts as dropped through the floor. Default `-0.04`.
 - `--allow-out-of-bin-filtering`: optional legacy/debug behavior that hides out-of-bin objects and accepts the remaining scene if visibility thresholds pass. Do not use it for training datasets. Default behavior is stricter: reject the whole attempt.
 - `--min-visible-objects`: reject samples with fewer visible instances.
 - `--min-visible-points`: reject samples with too few object points.
@@ -209,6 +228,37 @@ Useful options:
 --save-ply output.ply
 --no-window
 ```
+
+### Augmented Point Cloud Viewer
+
+Viewer script:
+
+```text
+scripts/view_augmented_point_cloud.py
+```
+
+Purpose:
+
+- Review how train-time noise/augmentation changes a processed point cloud, since augmentation only runs inside the DataLoader and is not visible anywhere else.
+- Apply the exact same `src/data/augmentation.py` used in training (xyz jitter, depth noise, point dropout, outliers, normal jitter, optional z-rotation) to a processed sample.
+- Show the clean cloud and the noisy cloud side by side in Open3D, colored by semantic or instance, with optional red highlighting of changed points.
+- Print stats: percent of points moved, mean/max displacement, semantic labels changed, object-to-background flips.
+
+Example:
+
+```powershell
+python .\scripts\view_augmented_point_cloud.py .\processed-data\pointnet2_semseg_k41144\test\sample_000011.npz --config .\configs\train\pointnet2_semseg_k41144.yaml
+```
+
+Useful options:
+
+```powershell
+--point-dropout-prob 0.1 --outlier-ratio 0.01 --depth-noise-std 0.001   # override the config / try values
+--highlight-changes                                                       # tint moved/relabeled points red
+--save-ply-clean clean.ply --save-ply-noisy noisy.ply --no-window         # export instead of opening a window
+```
+
+Input is a processed dataset `.npz` (the array the DataLoader actually loads), not a raw `sensor_data.npz`. With `--config` it reads the YAML `augment` block; CLI flags override it, and any override auto-enables augmentation.
 
 ### PySide6/VTK PLY Viewer
 

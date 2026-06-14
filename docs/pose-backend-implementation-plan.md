@@ -2,7 +2,97 @@
 
 Date: 2026-06-11
 
-Status: approved plan, waiting for the large synthetic dataset build to finish. Phases P0-P3 can start before or while data generates; P4-P5 need the large dataset.
+Status: implementation started 2026-06-14 (Wave 1). P0 done. Phases P0-P3 can start before or while data generates; P4-P5 need the large dataset.
+
+Wave 1 implementation log:
+
+```text
+P0 Contracts And Scaffolding: DONE (2026-06-14)
+  src/registry/bundle_schema.py, model_registry.py, __init__.py
+  src/service/schemas.py, __init__.py
+  configs/backend/service.yaml
+  scripts/package_model_bundle.py
+  tests/test_bundle_schema.py (6/6), tests/test_model_registry.py (5/5, loads on cpu + LRU)
+  Bundles packaged: models/K41144/v1, models/bending_pipe/v1 (gitignored; rebuild via package script)
+  Deviations from plan, intentional:
+    - Service schemas use dataclasses, not pydantic (no new dependency until the P7 FastAPI layer).
+    - Tests are standalone-runnable (python tests/test_*.py) since pytest is not installed; still pytest-compatible.
+    - Each checkpoint already embeds its train config, so the bundle loads config from the checkpoint
+      instead of storing a separate yaml; the bundle also vendors the STL + sampled model_points/keypoints
+      so it is self-contained (no dependency on object-model/ at serve time).
+P1 Symmetry productization: DONE (2026-06-14)
+  configs/symmetry/k41144.json, bending_pipe.json
+  src/training/pose_geometry.py: axis_angle_to_matrix, SymmetryDefinition, load_symmetry,
+    resolve_symmetry_matrices, continuous-axis expansion (dense finite approximation)
+  src/data/pose_crop_dataset.py: builds symmetry via resolve_symmetry_matrices (config-driven, name alias kept)
+  scripts/audit_object_symmetry.py, tests/test_symmetry.py (6/6)
+  Gate met: JSON matrices match built-in within 1e-6; K41144 identity baseline ADD 1.8e-6 mm,
+    success 1.0, rotation_error 0.0. Audit reproduces docs/k41144-pose-symmetry-audit.md
+    (y180 mean 0.133 / p95 0.317 / max 0.847 mm; no continuous axis).
+P2 End-to-end inference library: DONE (2026-06-14)
+  src/data/pose_crop_dataset.py: extracted build_pose_model_features (single source for the
+    pose model input + 18-d aux), __getitem__ refactored to use it (identity baseline unchanged).
+  src/inference/pose_pipeline.py: PosePipeline.from_loaded_bundle; infer_from_points (in-memory,
+    GT-label or predicted-clustering path) and infer_scene (depth -> unproject -> poses); reuses
+    instance model, cluster_voted_centers, build_pose_instance_crops, build_pose_model_features,
+    z-flip, and pose_predictions_to_object_to_camera. No file I/O in the call path.
+  tests/test_pose_pipeline.py (2/2).
+  Verified: K41144 GT-label path on a processed sample yields 30/30 instances, ADD mean 6.78 mm /
+    median 3.59 mm (offline GT-crop reference ~5.6 mm) -> golden-consistent; depth->poses predicted
+    path runs end to end with finite poses. Note: per-stage timings are returned; CPU instance stage
+    is slow (~14 s) as expected, GPU is the deployment target.
+P3 Confidence scoring + ranking + top-K metric: DONE (2026-06-14)
+  src/inference/confidence.py: ConfidenceConfig (per-bundle tunable), compute_instance_confidence
+    (v1 = weighted geometric mean of bounded sub-scores from center-vote dispersion, keypoint
+    dispersion, point count, cluster isolation, optional object prob / refinement inliers),
+    cluster_isolation, top_k_pick_success (top1 / topk).
+  src/inference/pose_pipeline.py: decode returns vote-dispersion diagnostics; infer computes
+    isolation + confidence per instance and ranks highest-first; honors options.min_confidence /
+    max_instances.
+  tests/test_confidence.py (5/5).
+  Verified on a K41144 scene: confidence is strongly informative -- ADD of the top-confidence half
+    2.93 mm vs bottom half 10.52 mm; top-1 and top-3 pick success = 1 at the 0.1d (10 mm) threshold.
+  Follow-up (not blocking): wire --report-topk into eval_pointnet2_pose.py and the suite (the
+    metric function exists; pipeline ranking already proves the value).
+
+Wave 1 (P0-P3) COMPLETE. Default device is GPU with CPU fallback.
+```
+
+Wave 2 implementation log (started 2026-06-14):
+
+```text
+Data prep: DONE
+  scripts/prepare_pointnet2_semseg_dataset.py --raw now accepts multiple roots (merged,
+  sample names prefixed by root). Merged bending_pipe_4..18 (skipping 12=1 sample, 14=missing)
+  = 1218 samples -> processed-data/pointnet2_semseg_bending_pipe_wave2 (train 974/val 122/test 122,
+  16384 points). Used --skip-raw-validation (datasets flagged SPARSE = few visible objects, not corrupt).
+P4 two-stage clustering: CODE DONE
+  src/inference/instance_clustering.py: TwoStageClusteringConfig + refine_instance_labels_two_stage
+    (split via 2-means on voted centers > split_separation_fraction*diameter; merge via union-find on
+    centroid proximity + point contiguity). Disabled by default; thresholds are diameter fractions.
+  src/inference/pose_pipeline.py predicted path applies it when bundle.inference.two_stage_clustering.enabled.
+  tests/test_instance_clustering_two_stage.py 4/4 (merge 2->1, split 1->2, disabled, config).
+  Instance retrained on the merged set (40 epochs): val_object_iou 0.9997; test semantic object_iou
+    0.9997, instance_recall 0.967, instance_precision 0.919, instance_mean_iou 0.959, split_count 1.78
+    (mild over-segmentation of long parts), merge_count 0.26.
+    Checkpoint: experiments/pointnet2_instance_bending_pipe_wave2_20260614_154448/checkpoints/best.pt.
+  Two-stage integrated into eval (scripts/eval_pointnet2_instance_seg.py --two-stage --object-diameter-m).
+  FINDING (rollback per plan): on this dense bending_pipe data with the strong retrained model,
+    stage-2 merge does not beat tuned stage-1. Loose merge (0.5/0.25) over-merges the dense 26-object
+    scenes (clusters 28.6->4.0, recall 0.94->0.25); tight merge (0.15/0.04) is a near no-op
+    (split_count 3.9->3.75, recall preserved). So two-stage stays DISABLED by default for bending_pipe;
+    the code is kept and config-gated for objects/scenes where stage-1 under/over-segments more.
+P5 pose retrain: GT crops exported
+  src/inference/pose_bridge.load_raw_metadata resolves merged prefixed names.
+  GT crops in experiments/wave2_pose_crops_bending_gt_{train,val,test} (974/122/122 crop files, all with GT pose).
+  Pose voting retraining PENDING (waits for the GPU to free after instance training).
+
+Remaining to finish Wave 2 (run after instance training frees the GPU):
+  1. Eval instance checkpoint on the test split; run the Phase 21 sweep incl. stage-2 thresholds.
+  2. Train pose voting: train_pointnet2_pose.py --config configs/train/pointnet2_pose_voting_bending_pipe.yaml
+       --data experiments/wave2_pose_crops_bending_gt_train --val-data .../gt_val --epochs 90 --batch-size 16 --device cuda
+  3. Eval pose (GT + predicted crops) against Gate A/B/C; repackage models/bending_pipe/v2 via package_model_bundle.py.
+```
 
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:
 

@@ -1,0 +1,23 @@
+# Pose-estimation backend service configuration (P0 scaffolding).
+# The runtime service (FastAPI) is implemented in P7; these values define the
+# registry root, device, and cache budget the library and service will use.
+
+registry:
+  root: models                 # bundle root: models/<sku>/<version>/
+  vram_budget_bundles: 2       # max bundles resident in VRAM (LRU eviction)
+
+inference:
+  device: cuda                 # falls back to cpu when CUDA is unavailable
+  ops_backend: pytorch3d       # PointNet++ ops backend; pure_torch fallback
+
+defaults:
+  max_instances: 10
+  refine: true
+  min_confidence: 0.0
+
+# Service (P7) bind/runtime settings; recorded now, consumed later.
+service:
+  host: 127.0.0.1
+  port: 8080
+  request_timeout_s: 30
+  max_queue_depth: 8
