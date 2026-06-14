@@ -20,7 +20,16 @@ P0 Contracts And Scaffolding: DONE (2026-06-14)
     - Each checkpoint already embeds its train config, so the bundle loads config from the checkpoint
       instead of storing a separate yaml; the bundle also vendors the STL + sampled model_points/keypoints
       so it is self-contained (no dependency on object-model/ at serve time).
-P1-P3: pending.
+P1 Symmetry productization: DONE (2026-06-14)
+  configs/symmetry/k41144.json, bending_pipe.json
+  src/training/pose_geometry.py: axis_angle_to_matrix, SymmetryDefinition, load_symmetry,
+    resolve_symmetry_matrices, continuous-axis expansion (dense finite approximation)
+  src/data/pose_crop_dataset.py: builds symmetry via resolve_symmetry_matrices (config-driven, name alias kept)
+  scripts/audit_object_symmetry.py, tests/test_symmetry.py (6/6)
+  Gate met: JSON matrices match built-in within 1e-6; K41144 identity baseline ADD 1.8e-6 mm,
+    success 1.0, rotation_error 0.0. Audit reproduces docs/k41144-pose-symmetry-audit.md
+    (y180 mean 0.133 / p95 0.317 / max 0.847 mm; no continuous axis).
+P2-P3: pending.
 ```
 
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:

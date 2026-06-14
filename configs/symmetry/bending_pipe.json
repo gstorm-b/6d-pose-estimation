@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "name": "bending_pipe",
+  "finite_rotations": [],
+  "continuous_axes": [],
+  "notes": "bending_pipe is strongly asymmetric under 180-degree rotations; identity only."
+}

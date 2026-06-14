@@ -12,8 +12,8 @@ import numpy as np
 from src.training.pose_geometry import (
     load_stl_vertices_m,
     model_diameter_m,
+    resolve_symmetry_matrices,
     sample_model_points,
-    symmetry_matrices_for_name,
 )
 
 try:
@@ -74,7 +74,7 @@ class PoseCropDataset(Dataset):  # type: ignore[misc]
             model_diameter_m=model_diameter_m(vertices),
             model_points_object=sample_model_points(vertices, int(model_point_count), seed=seed),
             keypoints_object=farthest_point_keypoints(vertices, int(keypoint_count), seed=seed),
-            symmetry_matrices_object=symmetry_matrices_for_name(symmetry_name),
+            symmetry_matrices_object=resolve_symmetry_matrices(symmetry_name),
             symmetry_name=symmetry_name,
         )
         self.records = self._build_records()

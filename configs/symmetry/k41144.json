@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "name": "k41144",
+  "finite_rotations": [
+    {"axis": [0, 1, 0], "angle_deg": 180}
+  ],
+  "continuous_axes": [],
+  "notes": "K41144 audit 2026-06-07: R_y(180) mean err 0.128 mm is the only strong symmetry. 90-deg rotations are not exact equivalences."
+}
