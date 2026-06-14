@@ -35,14 +35,23 @@ class PoseInstanceCrop:
 
 
 def load_raw_metadata(raw_root: str | Path | None, raw_sample: str | None) -> dict[str, Any] | None:
-    """Load raw synthetic metadata for a processed sample when available."""
+    """Load raw synthetic metadata for a processed sample when available.
+
+    Supports merged datasets whose sample names are prefixed by their source root
+    (e.g. `bending_pipe_10__sample_000000` -> `<raw_root>/bending_pipe_10/sample_000000`).
+    """
 
     if raw_root is None or not raw_sample:
         return None
-    metadata_path = Path(raw_root) / raw_sample / "metadata.json"
-    if not metadata_path.exists():
-        return None
-    return json.loads(metadata_path.read_text(encoding="utf-8"))
+    root = Path(raw_root)
+    candidates = [root / raw_sample / "metadata.json"]
+    if "__" in raw_sample:
+        prefix, _, suffix = raw_sample.partition("__")
+        candidates.append(root / prefix / suffix / "metadata.json")
+    for metadata_path in candidates:
+        if metadata_path.exists():
+            return json.loads(metadata_path.read_text(encoding="utf-8"))
+    return None
 
 
 def build_pose_instance_crops(
