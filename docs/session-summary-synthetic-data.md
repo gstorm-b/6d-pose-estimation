@@ -229,6 +229,37 @@ Useful options:
 --no-window
 ```
 
+### Augmented Point Cloud Viewer
+
+Viewer script:
+
+```text
+scripts/view_augmented_point_cloud.py
+```
+
+Purpose:
+
+- Review how train-time noise/augmentation changes a processed point cloud, since augmentation only runs inside the DataLoader and is not visible anywhere else.
+- Apply the exact same `src/data/augmentation.py` used in training (xyz jitter, depth noise, point dropout, outliers, normal jitter, optional z-rotation) to a processed sample.
+- Show the clean cloud and the noisy cloud side by side in Open3D, colored by semantic or instance, with optional red highlighting of changed points.
+- Print stats: percent of points moved, mean/max displacement, semantic labels changed, object-to-background flips.
+
+Example:
+
+```powershell
+python .\scripts\view_augmented_point_cloud.py .\processed-data\pointnet2_semseg_k41144\test\sample_000011.npz --config .\configs\train\pointnet2_semseg_k41144.yaml
+```
+
+Useful options:
+
+```powershell
+--point-dropout-prob 0.1 --outlier-ratio 0.01 --depth-noise-std 0.001   # override the config / try values
+--highlight-changes                                                       # tint moved/relabeled points red
+--save-ply-clean clean.ply --save-ply-noisy noisy.ply --no-window         # export instead of opening a window
+```
+
+Input is a processed dataset `.npz` (the array the DataLoader actually loads), not a raw `sensor_data.npz`. With `--config` it reads the YAML `augment` block; CLI flags override it, and any override auto-enables augmentation.
+
 ### PySide6/VTK PLY Viewer
 
 Viewer script:

@@ -153,6 +153,16 @@ If validation fails:
 - Reduce `object_restitution`.
 - Do not use `--allow-out-of-bin-filtering` for training datasets unless doing a legacy-data audit.
 
+## Review Train-Time Noise
+
+Augmentation runs only inside the DataLoader, so to see what the model actually trains on, render a processed sample clean-vs-noisy:
+
+```powershell
+python .\scripts\view_augmented_point_cloud.py .\processed-data\pointnet2_semseg_k41144\test\sample_000011.npz --config .\configs\train\pointnet2_semseg_k41144.yaml
+```
+
+Left cloud is clean, right is noisy. Override or experiment with `--point-dropout-prob`, `--outlier-ratio`, `--depth-noise-std`, etc.; add `--highlight-changes` to tint moved/relabeled points, or `--save-ply-clean/--save-ply-noisy --no-window` to export. Raw `synthetic-data/` stays clean; noise lives in `src/data/augmentation.py` and is applied per-epoch by the DataLoader, not baked into the dataset.
+
 ## Build Processed PointNet++ Dataset
 
 Processed datasets are derived from raw datasets and are safe to regenerate into a new folder.
