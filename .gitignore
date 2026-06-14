@@ -50,3 +50,6 @@ experiments/
 .codex/
 .agents/
 .gui_generation_preset.json
+
+# Model bundle registry (large checkpoints; rebuilt by scripts/package_model_bundle.py)
+models/

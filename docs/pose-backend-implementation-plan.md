@@ -2,7 +2,26 @@
 
 Date: 2026-06-11
 
-Status: approved plan, waiting for the large synthetic dataset build to finish. Phases P0-P3 can start before or while data generates; P4-P5 need the large dataset.
+Status: implementation started 2026-06-14 (Wave 1). P0 done. Phases P0-P3 can start before or while data generates; P4-P5 need the large dataset.
+
+Wave 1 implementation log:
+
+```text
+P0 Contracts And Scaffolding: DONE (2026-06-14)
+  src/registry/bundle_schema.py, model_registry.py, __init__.py
+  src/service/schemas.py, __init__.py
+  configs/backend/service.yaml
+  scripts/package_model_bundle.py
+  tests/test_bundle_schema.py (6/6), tests/test_model_registry.py (5/5, loads on cpu + LRU)
+  Bundles packaged: models/K41144/v1, models/bending_pipe/v1 (gitignored; rebuild via package script)
+  Deviations from plan, intentional:
+    - Service schemas use dataclasses, not pydantic (no new dependency until the P7 FastAPI layer).
+    - Tests are standalone-runnable (python tests/test_*.py) since pytest is not installed; still pytest-compatible.
+    - Each checkpoint already embeds its train config, so the bundle loads config from the checkpoint
+      instead of storing a separate yaml; the bundle also vendors the STL + sampled model_points/keypoints
+      so it is self-contained (no dependency on object-model/ at serve time).
+P1-P3: pending.
+```
 
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:
 
