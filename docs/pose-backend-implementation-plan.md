@@ -72,8 +72,16 @@ P4 two-stage clustering: CODE DONE
     centroid proximity + point contiguity). Disabled by default; thresholds are diameter fractions.
   src/inference/pose_pipeline.py predicted path applies it when bundle.inference.two_stage_clustering.enabled.
   tests/test_instance_clustering_two_stage.py 4/4 (merge 2->1, split 1->2, disabled, config).
-  Instance retraining on the merged set RUNNING (background, 40 epochs batch 2 on MX150 ~ hours);
-  log experiments/wave2_instance_train.log.
+  Instance retrained on the merged set (40 epochs): val_object_iou 0.9997; test semantic object_iou
+    0.9997, instance_recall 0.967, instance_precision 0.919, instance_mean_iou 0.959, split_count 1.78
+    (mild over-segmentation of long parts), merge_count 0.26.
+    Checkpoint: experiments/pointnet2_instance_bending_pipe_wave2_20260614_154448/checkpoints/best.pt.
+  Two-stage integrated into eval (scripts/eval_pointnet2_instance_seg.py --two-stage --object-diameter-m).
+  FINDING (rollback per plan): on this dense bending_pipe data with the strong retrained model,
+    stage-2 merge does not beat tuned stage-1. Loose merge (0.5/0.25) over-merges the dense 26-object
+    scenes (clusters 28.6->4.0, recall 0.94->0.25); tight merge (0.15/0.04) is a near no-op
+    (split_count 3.9->3.75, recall preserved). So two-stage stays DISABLED by default for bending_pipe;
+    the code is kept and config-gated for objects/scenes where stage-1 under/over-segments more.
 P5 pose retrain: GT crops exported
   src/inference/pose_bridge.load_raw_metadata resolves merged prefixed names.
   GT crops in experiments/wave2_pose_crops_bending_gt_{train,val,test} (974/122/122 crop files, all with GT pose).
