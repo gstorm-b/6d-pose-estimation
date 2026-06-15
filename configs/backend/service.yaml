@@ -1,6 +1,6 @@
-# Pose-estimation backend service configuration (P0 scaffolding).
-# The runtime service (FastAPI) is implemented in P7; these values define the
-# registry root, device, and cache budget the library and service will use.
+# Pose-estimation backend service configuration.
+# Consumed by scripts/run_backend_service.py (stdlib http.server, no fastapi dep).
+# Defines the registry root, device, cache budget, and bind/queue settings.
 
 registry:
   root: models                 # bundle root: models/<sku>/<version>/

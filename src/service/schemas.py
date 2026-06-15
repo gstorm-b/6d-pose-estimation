@@ -70,12 +70,15 @@ class InferenceOptions:
     max_instances: int = 10
     refine: bool = True
     min_confidence: float = 0.0
+    max_model_fit: float | None = None  # reject poses whose model->crop chamfer/diameter exceeds this
 
     def validate(self) -> None:
         if self.max_instances <= 0:
             raise SchemaError("max_instances must be > 0")
         if not (0.0 <= self.min_confidence <= 1.0):
             raise SchemaError("min_confidence must be in [0, 1]")
+        if self.max_model_fit is not None and self.max_model_fit <= 0:
+            raise SchemaError("max_model_fit must be > 0 when set")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -84,10 +87,12 @@ class InferenceOptions:
     def from_dict(cls, data: dict[str, Any] | None) -> "InferenceOptions":
         if not data:
             return cls()
+        max_fit = data.get("max_model_fit")
         return cls(
             max_instances=int(data.get("max_instances", 10)),
             refine=bool(data.get("refine", True)),
             min_confidence=float(data.get("min_confidence", 0.0)),
+            max_model_fit=None if max_fit is None else float(max_fit),
         )
 
 

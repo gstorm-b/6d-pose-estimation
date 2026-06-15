@@ -82,16 +82,106 @@ P4 two-stage clustering: CODE DONE
     scenes (clusters 28.6->4.0, recall 0.94->0.25); tight merge (0.15/0.04) is a near no-op
     (split_count 3.9->3.75, recall preserved). So two-stage stays DISABLED by default for bending_pipe;
     the code is kept and config-gated for objects/scenes where stage-1 under/over-segments more.
-P5 pose retrain: GT crops exported
-  src/inference/pose_bridge.load_raw_metadata resolves merged prefixed names.
-  GT crops in experiments/wave2_pose_crops_bending_gt_{train,val,test} (974/122/122 crop files, all with GT pose).
-  Pose voting retraining PENDING (waits for the GPU to free after instance training).
+P5 pose retrain: DONE
+  GT crops exported to experiments/wave2_pose_crops_bending_gt_{train,val,test} (974/122/122).
+  Pose voting retrained 90 epochs: experiments/pointnet2_pose_bending_pipe_20260614_191629.
+  GT-crop TEST eval (n=122, statistically meaningful vs the old n=18): ADD 4.57 mm, translation 4.61 mm,
+    ADD_0.1d 0.960, ADD_0.05d 0.907. Beats Gate A STRETCH (>=0.90, translation <=5.0 mm) and the strict
+    5 mm translation target -- a large gain over the old reference (ADD 9.9 mm, translation 9.5 mm,
+    ADD_0.1d 0.833 on n=18). The large dataset was the key driver.
+  Bundle repackaged: models/bending_pipe/v2 (registry resolves it as latest; loads on GPU). v1 kept.
 
-Remaining to finish Wave 2 (run after instance training frees the GPU):
-  1. Eval instance checkpoint on the test split; run the Phase 21 sweep incl. stage-2 thresholds.
-  2. Train pose voting: train_pointnet2_pose.py --config configs/train/pointnet2_pose_voting_bending_pipe.yaml
-       --data experiments/wave2_pose_crops_bending_gt_train --val-data .../gt_val --epochs 90 --batch-size 16 --device cuda
-  3. Eval pose (GT + predicted crops) against Gate A/B/C; repackage models/bending_pipe/v2 via package_model_bundle.py.
+WAVE 2 (P4 + P5) COMPLETE. The bending_pipe backend now meets Gate A on a large, trustworthy test set.
+Next options: regenerate/scale K41144 data (user generating it) and repeat P4/P5 for K41144; Wave 3
+(P7 service, P8 sim-to-real); run the full pose evaluation suite on the new model.
+```
+
+Wave 3 implementation log (started 2026-06-15):
+
+```text
+P7 Service Layer: DONE (2026-06-15)
+  src/service/runtime.py: ServiceRuntime wraps ModelRegistry + a per-SKU PosePipeline cache;
+    infer(payload) -> (http_status, body). Parses sku/options/version, decodes points_camera (+features)
+    or depth_npz_b64 (+intrinsics), resolves+loads the bundle once, runs the pipeline under a single
+    threading.Lock (one-GPU assumption), returns PoseResponse.to_dict() or a structured error.
+    list_skus()/health() for the GET endpoints. Diagnostics coerced JSON-safe (confidence_terms dropped).
+  src/service/app.py: stdlib http.server (ThreadingHTTPServer + BaseHTTPRequestHandler), zero new deps.
+    POST /v1/poses, GET /v1/skus, GET /v1/health. ServiceState admission gate (max_queue_depth) in front
+    of the GPU lock -> 429 when full; 256 MB body cap; never leaks a stack trace (structured 500).
+  scripts/run_backend_service.py: reads configs/backend/service.yaml (CLI overrides host/port/device/root),
+    optional --warmup pre-loads + warms the latest bundle of every SKU.
+  tests/test_service_contract.py (10/10): every error code via runtime.infer (invalid_input x6,
+    unknown_sku, admission control), a live HTTP smoke server (health/skus/404/bad-body, no models),
+    and a guarded real-inference round-trip on models/bending_pipe/v2.
+  Deviation from plan, intentional: stdlib http.server instead of FastAPI/uvicorn (neither is installed;
+    keeps the zero-extra-dependency stance from P0). Async transport + Prometheus metrics deferred
+    (single-GPU sync section is the bottleneck; structured per-request timings are already returned).
+  Verified live on GPU (MX150): GET /v1/health -> device=cuda, both SKUs discovered; GET /v1/skus ->
+    bending_pipe latest v2 gates_met=true. POST /v1/poses with a real wave2 test scene -> 200,
+    model_version v2, 5 ranked instances (top confidence 0.787), per-stage timings returned
+    (instance ~5.9 s on the weak MX150, pose ~0.57 s); cached second call ~6.5 s vs ~20 s cold.
+  Pending against pass criteria: 100-request leak smoke + 1-bundle-budget eviction alternation
+    (registry LRU already unit-tested in P0; service-level soak left for the production-GPU bring-up).
+P8 Sim-To-Real Readiness: DONE (2026-06-15)
+  src/data/augmentation.py: structured-light noise added to the existing augmenter (all off by default):
+    along-ray range^2 depth noise + depth quantization, normal-incidence (grazing) dropout, depth-
+    discontinuity (edge) dropout via scipy cKDTree xy-neighbour z-gaps, and specular blob dropout.
+    Camera-dependent terms take the camera position in the points' frame; the instance dataset passes
+    -normalization_center (scene-center normalized), fallback = top-down standoff camera. All dropout
+    sources combine into one keep mask + one fixed-size refill. tests/test_augmentation.py 6/6
+    (incidence targets grazing exactly: facing kept, grazing dropped; determinism; quantization; fixed size).
+  configs/train/pointnet2_instance_bending_pipe_sim2real.yaml: noise-on variant of the wave2 retrain
+    config (clean base untouched). Smoke-validated: the augmented dataloader yields finite (16384, 6)
+    batches on the real 974-sample train set with the camera path active.
+  scripts/prepare_real_eval_set.py: real-eval harness, camera-agnostic folder format
+    (<set>/<frame>/depth.npy + intrinsics.json (+normal.npy, labels.json, init_labels.json)).
+    Subcommands: export-synthetic (raw -> format, labels = visible GT, rigidified), evaluate (registry
+    pipeline per frame, Hungarian GT<->pred match gated at 0.3d, symmetry-aware ADD/translation/ADD_0.1d/
+    recall, optional --refine ICP), label (ICP-refine operator rough inits -> labels.json + quality).
+    docs/real-data-capture-guide.md documents capture, labeling, evaluation, and the noise retrain.
+  Validated end-to-end on GPU on synthetic frames exported through the format (pass criterion met):
+    export 4 bending_pipe frames -> evaluate -> label all run; metrics produced.
+  IMPORTANT FINDING (bug found + fixed): raw synthetic metadata object_to_camera bakes model_scale
+    (0.001) into the rotation columns; ADD must use rigid_object_to_camera_from_scaled (the export +
+    PoseCropDataset do this). The first harness export stored raw poses -> evaluate reported a bogus
+    ADD ~79 mm (translation fine, rotation scaled). Fixed by rigidifying on export. Confirmed the
+    pipeline + bundle are correct: an in-memory GT crop reproduces ADD ~4 mm (matches offline 4.04 mm).
+  IMPORTANT FINDING (gap, not a bug): the full PREDICTED path on dense ~40-object piles measures
+    ADD ~29 mm / ADD_0.1d ~0.60 / recall ~0.66 vs the GT-crop gate ADD 4.6 mm / ADD_0.1d 0.96. The pose
+    model is sound; the loss is dense-pile segmentation/clustering quality. Track the end-to-end number
+    as the production metric (improve via clustering, the learned refiner, or top-confidence-only picking).
+  Pending against pass criteria: the noise-augmented RETRAIN comparison (clean-gate ADD_0.1d regression
+    <= 0.02) is a multi-hour GPU job left to run on demand; harness + augmentation + config are ready.
+
+Usage tooling + docs (2026-06-16): src/inference/instance_segmentation.py (InstanceSegmenter, load from
+  bundle or raw checkpoint; scene/depth -> per-point instance labels + clusters, no pose stage) +
+  scripts/run_instance_segmentation.py (CLI: depth/points input, npz+json output, optional colored PLY +
+  2D mask, inline clustering overrides). tests/test_instance_segmentation.py 3/3 (fake-model contract,
+  subsampling, real bundle). docs/usage-guide.md is the end-to-end how-to (service, library, instance-seg
+  tool, registry, eval harness, packaging, conventions, troubleshooting).
+
+WAVE 3 (P7 + P8) COMPLETE. Backend is servable (HTTP) and the sim-to-real gap is measurable.
+
+Dense-pile predicted-path pose gap: DIAGNOSED + MITIGATED (2026-06-15/16). See docs/dense-pile-pose-gap.md.
+  Root cause: train/inference crop-distribution mismatch (pose trained on GT crops -> ADD_0.1d 0.96;
+    infers on predicted-cluster crops -> 0.60). NOT contamination (96.9% pure clusters), NOT a missing
+    symmetry (audit: bending_pipe genuinely asymmetric; x180 oracle does not recover the wrong poses).
+  Fix (inference-time, no retrain): model_fit = posed-model->crop chamfer/diameter, computed per instance
+    in pose_pipeline._model_fit; near-perfect correct-vs-wrong signal (AUC ~0.99, correct ~0.026 vs wrong
+    ~0.81). Added as a dominating confidence term (confidence.py weight 6.0, model_fit_scale 0.05) + an
+    optional InferenceOptions.max_model_fit gate. Ranking/gating only - poses unchanged, GT gates safe.
+  Result (rigorous, Hungarian-matched, prepare_real_eval_set.py evaluate now reports pick success):
+    top-1 pick success ~0.70 -> 1.0, top-3 ~0.90 -> 1.0 on the dense synthetic set; per-instance ADD_0.1d
+    unchanged (0.59) by design. Fit gate 0.05 -> precision ~0.88 keeping ~99% of correct poses.
+  scripts/diagnose_dense_pile_gap.py reproduces the diagnosis. tests/test_confidence.py +model_fit (6/6).
+  Tried (negative result, rolled back): retrain pose voting FROM SCRATCH on predicted crops
+    (export_pose_instance_crops --source predicted, 17343/2219/2057 crops; run
+    experiments/pointnet2_pose_bending_pipe_20260616_003256, plateau val ADD_0.1d ~0.54). Candidate v3
+    vs v2 on the dense-pile diagnostic: raw per-instance precision 0.42 vs 0.58 (WORSE), fit-gate<0.05
+    0.62/0.93 vs 0.67/1.0 (worse), top-1/top-3 pick 1.0/1.0 both. Predicted crops include ambiguous
+    split/partial crops -> noisy training signal; from scratch underperforms the GT-trained model.
+    v3 deleted; v2 + model-fit confidence stays production. Revisit only via finetune-v2 or GT+predicted
+    mix if per-instance precision must rise (uncertain, multi-hour). See docs/dense-pile-pose-gap.md.
 ```
 
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:
@@ -471,6 +561,8 @@ Failed gate at any stage stops the pipeline with an actionable message.
 
 ## Phase P7: Service Layer
 
+Status: DONE (2026-06-15) - implemented with the stdlib http.server (no FastAPI dep); see the Wave 3 log.
+
 Needs large dataset: no. Depends on: P0, P2, P3.
 
 Deliverables:
@@ -485,11 +577,11 @@ docs/backend-api.md (request/response examples, error codes, client snippet)
 
 Implementation details:
 
-- FastAPI v1 endpoints:
-  - `POST /v1/poses` - body per P0 schema; depth transported as compressed npz (base64) or raw float32 buffer; response includes model_version used.
-  - `GET /v1/skus` - registry listing with versions and gate status.
-  - `GET /v1/health` - device, VRAM, loaded bundles, git/build version.
-- GPU concurrency: single worker queue serializing GPU inference (one GPU assumption); request timeout; backpressure with 429 when queue depth exceeded. Async I/O for transport, sync GPU section.
+- v1 endpoints (stdlib http.server, as built):
+  - `POST /v1/poses` - body per P0 schema; scene transported as `points_camera` (+optional `features`) or `depth_npz_b64` (base64 npz of `depth_m` (+`normal_camera`)) with `intrinsics`; response includes the model_version used.
+  - `GET /v1/skus` - registry listing with versions, latest, symmetry, diameter, gate status.
+  - `GET /v1/health` - device, loaded bundles, available SKUs.
+- GPU concurrency: single threading.Lock serializing GPU inference (one GPU assumption); `gpu_acquire_timeout_s` request timeout; ServiceState admission gate returns 429 when `max_queue_depth` in flight. (FastAPI/uvicorn async transport not used - neither is installed; the sync GPU section is the bottleneck anyway.)
 - Bundle cache from P0 registry with VRAM budget from `service.yaml`; `POST /v1/poses` for an uncached SKU triggers load (first-call latency documented).
 - Observability: structured JSON logs per request (sku, timings, instance count, top confidence), Prometheus-style metrics endpoint (request count, latency histogram, queue depth, per-stage timings).
 - Security explicitly out of scope for v1 beyond bind-address config; note for deployment that it must sit on a trusted cell network.
@@ -503,6 +595,8 @@ Two SKUs alternating requests work with cache eviction at a 1-bundle budget.
 ```
 
 ## Phase P8: Sim-To-Real Readiness
+
+Status: DONE (2026-06-15) - augmentation + harness + config shipped and validated; noise retrain left to run on demand. See the Wave 3 log.
 
 Needs large dataset: retrain step yes; harness no. Depends on: P2. Can run parallel to P4-P7.
 
