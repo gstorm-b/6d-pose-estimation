@@ -85,6 +85,7 @@ class PointNet2InstanceSegDataset(Dataset):  # type: ignore[misc]
             instance_labels,
             self.augment_config,
             self.rng,
+            camera_position=-normalization_center.reshape(3),
         )
         targets = self._build_instance_targets(points_normalized, semantic_labels, instance_labels)
         model_input = points_normalized if features is None else np.concatenate([points_normalized, features], axis=1)
