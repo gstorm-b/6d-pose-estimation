@@ -75,12 +75,30 @@ The fit gate (`--max-model-fit 0.05`) additionally turns the raw output into a
 high-precision set (precision ~0.88, keeping ~99% of correct poses) for callers
 that want every returned pose to be trustworthy, not just the top pick.
 
-## Remaining work (optional, raises per-instance precision)
+## Tried: retrain the pose model on predicted crops (negative result)
 
-The fix solves the operational metric. To also raise per-instance ADD_0.1d
-(currently ~0.59) toward the GT-crop 0.96, close the train/inference mismatch by
-**retraining the pose model on predicted-cluster crops** (the predicted-crop
-export already exists, e.g. `experiments/phase17_pose_crops_bending_pipe_pred_*`).
-That is a multi-hour GPU job, left to run on demand. The model-fit confidence and
-gate stand on their own and benefit any object, K41144 included.
+To also raise per-instance ADD_0.1d (~0.59) we exported predicted-cluster crops
+for train/val/test (`scripts/export_pose_instance_crops.py --source predicted`,
+17343/2219/2057 crops) and trained the pose voting model **from scratch** on them
+(`experiments/pointnet2_pose_bending_pipe_20260616_003256`). It plateaued at
+val ADD_0.1d ~0.54 on predicted crops (best epoch 14). Packaged as a candidate v3
+and compared to v2 on the dense-pile diagnostic:
+
+| metric | v2 (GT-trained) | v3 (predicted-trained) |
+|--------|-----------------|------------------------|
+| raw per-instance precision | **0.58** | 0.42 (worse) |
+| fit-gate<0.05 precision / recall | 0.67 / 1.0 | 0.62 / 0.93 (worse) |
+| top-1 / top-3 pick success | 1.0 / 1.0 | 1.0 / 1.0 |
+
+**From-scratch training on predicted crops did not help - it hurt.** Predicted
+clusters include many split/partial crops whose pose is genuinely ambiguous; as a
+training signal they are noisy, and from scratch the model never reaches the
+orientation discrimination that clean GT crops teach. v3 was rolled back; **v2 +
+the model-fit confidence stays the production config** (it already gives top-1
+pick success 1.0). The predicted crops and the diagnostic are kept for reuse.
+
+If raising per-instance precision is revisited, try **finetuning v2** on predicted
+crops (preserve the GT orientation prior) or a **GT+predicted mix** rather than
+from scratch - both are uncertain and multi-hour on the shared GPU. The model-fit
+fix is object-agnostic and already solves the operational metric.
 ```

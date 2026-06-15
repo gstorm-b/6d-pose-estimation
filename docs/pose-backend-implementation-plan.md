@@ -167,8 +167,14 @@ Dense-pile predicted-path pose gap: DIAGNOSED + MITIGATED (2026-06-15/16). See d
     top-1 pick success ~0.70 -> 1.0, top-3 ~0.90 -> 1.0 on the dense synthetic set; per-instance ADD_0.1d
     unchanged (0.59) by design. Fit gate 0.05 -> precision ~0.88 keeping ~99% of correct poses.
   scripts/diagnose_dense_pile_gap.py reproduces the diagnosis. tests/test_confidence.py +model_fit (6/6).
-  Optional next step to raise per-instance precision: retrain pose on predicted crops (export exists;
-    multi-hour job, left on demand). The model-fit fix is object-agnostic and benefits K41144 too.
+  Tried (negative result, rolled back): retrain pose voting FROM SCRATCH on predicted crops
+    (export_pose_instance_crops --source predicted, 17343/2219/2057 crops; run
+    experiments/pointnet2_pose_bending_pipe_20260616_003256, plateau val ADD_0.1d ~0.54). Candidate v3
+    vs v2 on the dense-pile diagnostic: raw per-instance precision 0.42 vs 0.58 (WORSE), fit-gate<0.05
+    0.62/0.93 vs 0.67/1.0 (worse), top-1/top-3 pick 1.0/1.0 both. Predicted crops include ambiguous
+    split/partial crops -> noisy training signal; from scratch underperforms the GT-trained model.
+    v3 deleted; v2 + model-fit confidence stays production. Revisit only via finetune-v2 or GT+predicted
+    mix if per-instance precision must rise (uncertain, multi-hour). See docs/dense-pile-pose-gap.md.
 ```
 
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:

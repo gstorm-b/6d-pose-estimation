@@ -55,6 +55,7 @@ def main() -> int:
     parser.add_argument("--processed", default="processed-data/pointnet2_semseg_bending_pipe_wave2/test")
     parser.add_argument("--raw-root", default="synthetic-data")
     parser.add_argument("--registry-root", default="models")
+    parser.add_argument("--version", default=None, help="Bundle version to evaluate (default: latest).")
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--out", default="experiments/dense_pile_gap")
@@ -68,7 +69,7 @@ def main() -> int:
     from src.training.pose_geometry import resolve_symmetry_matrices
 
     registry = ModelRegistry(args.registry_root)
-    loaded = registry.load(registry.resolve(args.sku), device=resolve_device(args.device))
+    loaded = registry.load(registry.resolve(args.sku, args.version), device=resolve_device(args.device))
     pipeline = PosePipeline.from_loaded_bundle(loaded)
     model_points = loaded.model_points_object.astype(np.float64)
     diameter = float(loaded.diameter_m)
