@@ -96,6 +96,34 @@ Next options: regenerate/scale K41144 data (user generating it) and repeat P4/P5
 (P7 service, P8 sim-to-real); run the full pose evaluation suite on the new model.
 ```
 
+Wave 3 implementation log (started 2026-06-15):
+
+```text
+P7 Service Layer: DONE (2026-06-15)
+  src/service/runtime.py: ServiceRuntime wraps ModelRegistry + a per-SKU PosePipeline cache;
+    infer(payload) -> (http_status, body). Parses sku/options/version, decodes points_camera (+features)
+    or depth_npz_b64 (+intrinsics), resolves+loads the bundle once, runs the pipeline under a single
+    threading.Lock (one-GPU assumption), returns PoseResponse.to_dict() or a structured error.
+    list_skus()/health() for the GET endpoints. Diagnostics coerced JSON-safe (confidence_terms dropped).
+  src/service/app.py: stdlib http.server (ThreadingHTTPServer + BaseHTTPRequestHandler), zero new deps.
+    POST /v1/poses, GET /v1/skus, GET /v1/health. ServiceState admission gate (max_queue_depth) in front
+    of the GPU lock -> 429 when full; 256 MB body cap; never leaks a stack trace (structured 500).
+  scripts/run_backend_service.py: reads configs/backend/service.yaml (CLI overrides host/port/device/root),
+    optional --warmup pre-loads + warms the latest bundle of every SKU.
+  tests/test_service_contract.py (10/10): every error code via runtime.infer (invalid_input x6,
+    unknown_sku, admission control), a live HTTP smoke server (health/skus/404/bad-body, no models),
+    and a guarded real-inference round-trip on models/bending_pipe/v2.
+  Deviation from plan, intentional: stdlib http.server instead of FastAPI/uvicorn (neither is installed;
+    keeps the zero-extra-dependency stance from P0). Async transport + Prometheus metrics deferred
+    (single-GPU sync section is the bottleneck; structured per-request timings are already returned).
+  Verified live on GPU (MX150): GET /v1/health -> device=cuda, both SKUs discovered; GET /v1/skus ->
+    bending_pipe latest v2 gates_met=true. POST /v1/poses with a real wave2 test scene -> 200,
+    model_version v2, 5 ranked instances (top confidence 0.787), per-stage timings returned
+    (instance ~5.9 s on the weak MX150, pose ~0.57 s); cached second call ~6.5 s vs ~20 s cold.
+  Pending against pass criteria: 100-request leak smoke + 1-bundle-budget eviction alternation
+    (registry LRU already unit-tested in P0; service-level soak left for the production-GPU bring-up).
+```
+
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:
 
 1. The current repository state (instance segmentation Phase 0-10, pose Phase 11-23, generator physics fix 2026-06-10).
@@ -473,6 +501,8 @@ Failed gate at any stage stops the pipeline with an actionable message.
 
 ## Phase P7: Service Layer
 
+Status: DONE (2026-06-15) - implemented with the stdlib http.server (no FastAPI dep); see the Wave 3 log.
+
 Needs large dataset: no. Depends on: P0, P2, P3.
 
 Deliverables:
@@ -487,11 +517,11 @@ docs/backend-api.md (request/response examples, error codes, client snippet)
 
 Implementation details:
 
-- FastAPI v1 endpoints:
-  - `POST /v1/poses` - body per P0 schema; depth transported as compressed npz (base64) or raw float32 buffer; response includes model_version used.
-  - `GET /v1/skus` - registry listing with versions and gate status.
-  - `GET /v1/health` - device, VRAM, loaded bundles, git/build version.
-- GPU concurrency: single worker queue serializing GPU inference (one GPU assumption); request timeout; backpressure with 429 when queue depth exceeded. Async I/O for transport, sync GPU section.
+- v1 endpoints (stdlib http.server, as built):
+  - `POST /v1/poses` - body per P0 schema; scene transported as `points_camera` (+optional `features`) or `depth_npz_b64` (base64 npz of `depth_m` (+`normal_camera`)) with `intrinsics`; response includes the model_version used.
+  - `GET /v1/skus` - registry listing with versions, latest, symmetry, diameter, gate status.
+  - `GET /v1/health` - device, loaded bundles, available SKUs.
+- GPU concurrency: single threading.Lock serializing GPU inference (one GPU assumption); `gpu_acquire_timeout_s` request timeout; ServiceState admission gate returns 429 when `max_queue_depth` in flight. (FastAPI/uvicorn async transport not used - neither is installed; the sync GPU section is the bottleneck anyway.)
 - Bundle cache from P0 registry with VRAM budget from `service.yaml`; `POST /v1/poses` for an uncached SKU triggers load (first-call latency documented).
 - Observability: structured JSON logs per request (sku, timings, instance count, top confidence), Prometheus-style metrics endpoint (request count, latency histogram, queue depth, per-stage timings).
 - Security explicitly out of scope for v1 beyond bind-address config; note for deployment that it must sit on a trusted cell network.
