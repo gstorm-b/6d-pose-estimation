@@ -1,8 +1,10 @@
 # Hướng Dẫn Tạo Data, Train Và Chạy Model
 
-Ngày cập nhật: 2026-06-08
+Ngày cập nhật: 2026-06-16
 
-Trạng thái: pipeline hiện tại đã hoàn thành đến pose Phase 23. Backbone pose chính là PointNet++ theo hướng PS6D-style keypoint/center voting. Refinement bằng ICP và learned translation refiner đã có, nhưng phải báo cáo tách biệt với raw pose.
+Trạng thái: pipeline research đã hoàn thành đến pose Phase 23; đã bổ sung dataset lớn (Wave 2) và backend phục vụ model (Wave 1-3: registry/bundle, library pipeline, HTTP service, instance-seg tool, eval harness). Backbone pose chính là PointNet++ theo hướng PS6D-style keypoint/center voting. Refinement bằng ICP và learned translation refiner đã có, nhưng phải báo cáo tách biệt với raw pose.
+
+**Đọc section "Cập Nhật 2026-06-16" ngay dưới đây trước** — nó chứa reference checkpoint/metric MỚI, cách gộp dataset lớn, cách đóng gói + chạy backend, và các kết quả âm KHÔNG nên lặp lại. Phần còn lại (mục 1-21) vẫn đúng cho pipeline cơ bản.
 
 Tài liệu này là runbook tiếng Việt để engineer có thể dựng lại toàn bộ pipeline:
 
@@ -17,6 +19,64 @@ Blender synthetic data
   -> optional learned translation refiner
   -> full pose evaluation suite
 ```
+
+## Cập Nhật 2026-06-16 (Backend + Wave 2/3 — đọc trước)
+
+Runbook gốc (mục 1-21) vẫn đúng cho pipeline cơ bản. Những điểm thay đổi quan trọng kể từ 2026-06-08:
+
+### A. Gộp dataset lớn bằng multi-root (Wave 2)
+
+`prepare_pointnet2_semseg_dataset.py --raw` giờ nhận NHIỀU root; sample được prefix theo root (vd `bending_pipe_10__sample_000000`). Đây là cách tạo dataset lớn từ nhiều lần generate:
+
+```powershell
+python .\scripts\prepare_pointnet2_semseg_dataset.py --raw .\synthetic-data\bending_pipe_4 .\synthetic-data\bending_pipe_5 .\synthetic-data\bending_pipe_6 .\synthetic-data\bending_pipe_18 --out .\processed-data\pointnet2_semseg_bending_pipe_wave2 --num-points 16384 --use-normals --skip-raw-validation
+```
+
+`SPARSE` = ít object visible, KHÔNG phải corrupt → dùng `--skip-raw-validation` khi đã tin data. Khi export pose crop từ dataset gộp, truyền `--raw-root .\synthetic-data` (root cha) để bridge tự resolve tên prefix.
+
+### B. Reference checkpoint + metric MỚI (dùng cái này cho bending_pipe)
+
+```text
+Instance bending_pipe (Wave 2):
+  experiments/pointnet2_instance_bending_pipe_wave2_20260614_154448/checkpoints/best.pt
+  test object_iou 0.9997, instance_recall 0.967, split_count 1.78
+Pose bending_pipe (Wave 2, GT crops):
+  experiments/pointnet2_pose_bending_pipe_20260614_191629/checkpoints/best_add.pt
+  GT-crop test (n=122): ADD 4.57 mm, translation 4.61 mm, ADD_0.1d 0.960
+  (vượt xa reference cũ 9.9 mm / 0.833; driver chính là dataset lớn)
+K41144: vẫn dùng checkpoint 2026-06-08 cho tới khi có data K41144 lớn → lặp Wave 2 cho K41144.
+```
+
+Two-stage clustering (merge/split) đã thử trên dense bending_pipe → KHÔNG cải thiện (merge lỏng gộp nhầm scene dày, merge chặt gần no-op) → **tắt mặc định**, giữ code config-gated.
+
+### C. Đóng gói + phục vụ model (backend Wave 1-3)
+
+Sau khi có instance + pose checkpoint, đóng gói thành bundle cho registry rồi phục vụ. Bundle tự chứa STL + model points/keypoints + diameter + symmetry + tham số inference.
+
+```powershell
+python .\scripts\package_model_bundle.py --sku bending_pipe --version v2 --instance-checkpoint .\experiments\pointnet2_instance_bending_pipe_wave2_20260614_154448\checkpoints\best.pt --pose-checkpoint .\experiments\pointnet2_pose_bending_pipe_20260614_191629\checkpoints\best_add.pt --object-probability-threshold 0.5 --dbscan-eps-m 0.006 --dbscan-min-samples 8 --min-cluster-points 32 --num-points 16384 --overwrite
+```
+
+- **Chạy end-to-end KHÔNG cần export crop thủ công**: dùng library `src/inference/pose_pipeline.py` (scene point cloud / depth → ranked `object_to_camera`) hoặc HTTP service `scripts/run_backend_service.py`. Hướng dẫn dùng đầy đủ: **docs/usage-guide.md**. API HTTP: **docs/backend-api.md**.
+- **Instance segmentation độc lập**: `scripts/run_instance_segmentation.py` (từ bundle `--sku` hoặc checkpoint thô `--checkpoint`; input depth/points; output labels + clusters + PLY màu + mask 2D).
+- **Confidence + chọn pick**: confidence giờ có term `model_fit` (chamfer model-đã-pose → crop) — pose sai bị hạ rank mạnh; **top-1 pick success ~1.0** trên pile dày. Option `max_model_fit` để gate. Chi tiết: **docs/dense-pile-pose-gap.md**.
+- **Eval trên folder frame (synthetic/real)**: `scripts/prepare_real_eval_set.py` (export-synthetic / evaluate / label; báo ADD/ADD_0.1d/recall/top-K pick). Hướng dẫn capture real: **docs/real-data-capture-guide.md**.
+- **Sim-to-real noise** (P8): bật bằng `configs/train/pointnet2_instance_bending_pipe_sim2real.yaml` (structured-light noise: along-ray range², quantization, grazing/edge/blob dropout — mặc định tắt ở config gốc).
+
+### D. KẾT QUẢ ÂM đã kiểm chứng — KHÔNG lặp lại
+
+- **Train pose voting FROM-SCRATCH trên predicted crops → TỆ HƠN GT-trained** (dense-pile per-instance precision 0.42 vs 0.58). Predicted crops có nhiều crop split/partial pose mơ hồ → tín hiệu train nhiễu. Giữ GT-trained + `model_fit`. Nếu muốn nâng per-instance precision: thử **finetune từ GT model** (`--resume`) hoặc **mix GT+predicted**, KHÔNG from-scratch. (docs/dense-pile-pose-gap.md)
+- Gap predicted-path trên pile dày KHÔNG do contamination (96.9% cluster pure) cũng KHÔNG do symmetry thiếu (bending_pipe thật sự bất đối xứng) — mà do train/inference crop-distribution mismatch; đã mitigate bằng `model_fit` confidence.
+
+### E. Training gotchas (GPU yếu / Windows)
+
+- stdout của train script bị **block-buffered** khi ghi ra file → dùng `python -u` hoặc đọc `experiments/<run>/metrics.json` (ghi per-epoch) để xem tiến độ live.
+- `--num-workers 0` an toàn trên Windows; `>0` có thể chậm spawn và không giúp nhiều khi GPU là nút thắt.
+- MX150 chỉ 2GB VRAM; nếu chạy đồng thời Blender generation thì ~8 phút/epoch (cạnh tranh GPU). Kill đúng tiến trình train bằng match command-line (`train_pointnet2_pose` / `train_pointnet2_instance_seg`), tránh kill Blender.
+- Khi `--resume`, training bắt đầu ở `epoch_checkpoint + 1`, nên `--epochs N` phải lớn hơn epoch của checkpoint thì mới train tiếp.
+- `best_add.pt` luôn là checkpoint theo validation ADD tốt nhất → early-stop khi val plateau vẫn lấy được checkpoint tốt.
+
+---
 
 ## 1. Quy Ước Quan Trọng
 
@@ -747,13 +807,16 @@ samples[].refined_metrics
 
 ## 21. Trạng Thái Reference Hiện Tại
 
+> Cho bending_pipe dùng checkpoint Wave 2 dưới đây (xem section "Cập Nhật 2026-06-16"). Checkpoint 2026-06-07/08 chỉ giữ làm lịch sử. K41144 vẫn dùng 2026-06-08 cho tới khi có data lớn.
+
 Instance checkpoints:
 
 ```text
 K41144:
   experiments/pointnet2_instance_k41144_20260607_165729/checkpoints/best.pt
-
-bending_pipe:
+bending_pipe (Wave 2, dùng cái này):
+  experiments/pointnet2_instance_bending_pipe_wave2_20260614_154448/checkpoints/best.pt
+bending_pipe (cũ, lịch sử):
   experiments/pointnet2_instance_bending_pipe_20260607_171218/checkpoints/best.pt
 ```
 
@@ -762,9 +825,17 @@ Pose checkpoints:
 ```text
 K41144:
   experiments/pointnet2_pose_k41144_20260608_023605/checkpoints/best_add.pt
-
-bending_pipe:
+bending_pipe (Wave 2, dùng cái này — GT-crop ADD 4.57 mm / ADD_0.1d 0.960):
+  experiments/pointnet2_pose_bending_pipe_20260614_191629/checkpoints/best_add.pt
+bending_pipe (cũ, lịch sử):
   experiments/pointnet2_pose_bending_pipe_20260608_021309/checkpoints/best_add.pt
+```
+
+Bundle đã đóng gói (registry, gitignored — dựng lại bằng package_model_bundle.py):
+
+```text
+models/bending_pipe/v2  (latest; instance Wave 2 + pose Wave 2 + model_fit confidence)
+models/K41144/v1
 ```
 
 Phase 20 refined GT-crop reference:
@@ -786,12 +857,15 @@ experiments/phase23_smoke_pose_eval_suite/summary.json
 experiments/phase23_smoke_pose_eval_suite/summary.md
 ```
 
-Việc tiếp theo nên làm khi có data lớn hơn:
+Việc tiếp theo:
 
 ```text
-1. Train lại instance và pose cho từng object.
-2. Chạy full Phase 21 sweep cho K41144 nếu predicted-crop vẫn yếu.
-3. Train learned refiner trên full data nếu cần.
-4. Chạy full Phase 23 suite không dùng --limit-samples.
-5. Chỉ promote checkpoint/refinement nếu suite cho thấy cải thiện ổn định trên cả K41144 và bending_pipe.
+1. bending_pipe: ĐÃ XONG Wave 2 (instance + pose retrain trên data lớn) + đóng gói bundle v2 + backend.
+2. K41144: lặp lại Wave 2 khi có data lớn — gộp multi-root, retrain instance + pose,
+   đóng gói bundle K41144 v2 (giống quy trình bending_pipe ở section "Cập Nhật 2026-06-16").
+3. KHÔNG train pose from-scratch trên predicted crops (đã kiểm chứng tệ hơn — xem mục D).
+   Nếu cần nâng per-instance precision: finetune từ GT model hoặc mix GT+predicted.
+4. Chạy full Phase 23 suite không dùng --limit-samples sau mỗi lần retrain.
+5. Chỉ promote checkpoint/bundle nếu eval (GT-crop gate + dense-pile + suite) cải thiện ổn định.
+6. Khi có camera thật: chạy P8 real-eval harness + cân nhắc bật sim-to-real noise augmentation.
 ```
