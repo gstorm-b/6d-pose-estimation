@@ -153,6 +153,13 @@ P8 Sim-To-Real Readiness: DONE (2026-06-15)
   Pending against pass criteria: the noise-augmented RETRAIN comparison (clean-gate ADD_0.1d regression
     <= 0.02) is a multi-hour GPU job left to run on demand; harness + augmentation + config are ready.
 
+Usage tooling + docs (2026-06-16): src/inference/instance_segmentation.py (InstanceSegmenter, load from
+  bundle or raw checkpoint; scene/depth -> per-point instance labels + clusters, no pose stage) +
+  scripts/run_instance_segmentation.py (CLI: depth/points input, npz+json output, optional colored PLY +
+  2D mask, inline clustering overrides). tests/test_instance_segmentation.py 3/3 (fake-model contract,
+  subsampling, real bundle). docs/usage-guide.md is the end-to-end how-to (service, library, instance-seg
+  tool, registry, eval harness, packaging, conventions, troubleshooting).
+
 WAVE 3 (P7 + P8) COMPLETE. Backend is servable (HTTP) and the sim-to-real gap is measurable.
 
 Dense-pile predicted-path pose gap: DIAGNOSED + MITIGATED (2026-06-15/16). See docs/dense-pile-pose-gap.md.
