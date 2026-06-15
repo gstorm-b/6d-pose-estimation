@@ -190,6 +190,28 @@ def _match_and_score(predictions, labels, model_points, symmetry, diameter, matc
     return rows
 
 
+def _pick_success(predictions, labels, model_points, symmetry, diameter, k=3):
+    """Top-1/top-k pick success: ranked by confidence, is a pick a graspable pose?
+
+    A pose is graspable if its symmetry-aware ADD to the nearest GT object is below
+    0.1 diameter. Predictions arrive already confidence-ranked from the pipeline.
+    """
+    thr = 0.1 * diameter * 1000.0
+    gts = [np.asarray(g["object_to_camera"], dtype=np.float64) for g in labels]
+    if not gts:
+        return False, False
+    flags = []
+    for p in predictions:
+        P = np.asarray(p["object_to_camera"], dtype=np.float64)
+        transformed = model_points @ P[:3, :3].T + P[:3, 3]
+        best = min(
+            float(np.mean(np.linalg.norm(transformed - (model_points @ (g[:3, :3] @ S).T + g[:3, 3]), axis=1)))
+            for g in gts for S in symmetry
+        ) * 1000.0
+        flags.append(best < thr)
+    return (bool(flags and flags[0]), any(flags[:k]))
+
+
 def cmd_evaluate(args: argparse.Namespace) -> int:
     from src.service.schemas import InferenceOptions
     from src.training.pose_geometry import resolve_symmetry_matrices
@@ -203,9 +225,12 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
     model_points = loaded.model_points_object.astype(np.float64)
     diameter = float(loaded.diameter_m)
     symmetry = resolve_symmetry_matrices(loaded.bundle.manifest.model.symmetry_name).astype(np.float64)
-    options = InferenceOptions(max_instances=args.max_instances, min_confidence=args.min_confidence)
+    options = InferenceOptions(
+        max_instances=args.max_instances, min_confidence=args.min_confidence, max_model_fit=args.max_model_fit
+    )
 
     all_add, all_trans, total_gt, total_matched, per_frame = [], [], 0, 0, []
+    pick_top1, pick_top3 = [], []
     for frame in frames:
         depth = np.load(frame / "depth.npy").astype(np.float32)
         intrinsics = _read_json(frame / "intrinsics.json")
@@ -233,7 +258,12 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             total_matched += len(matched)
             all_add.extend(r["add_mm"] for r in matched)
             all_trans.extend(r["translation_mm"] for r in matched)
-            frame_report.update({"n_gt": len(rows), "n_matched": len(matched)})
+            # Operational bin-picking metric: rank picks by confidence, is the top
+            # (or one of top-3) a graspable pose (ADD < 0.1d to some object)?
+            t1, t3 = _pick_success(predictions, labels, model_points, symmetry, diameter)
+            pick_top1.append(t1)
+            pick_top3.append(t3)
+            frame_report.update({"n_gt": len(rows), "n_matched": len(matched), "top1_pick": t1, "top3_pick": t3})
         per_frame.append(frame_report)
         _write_json(frame / "predictions.json", {"sku": args.sku, "model_version": loaded.bundle.version, "instances": predictions, "timings_ms": result.timings_ms})
 
@@ -248,10 +278,13 @@ def cmd_evaluate(args: argparse.Namespace) -> int:
             "add_mm_mean": round(float(add.mean()), 3), "add_mm_median": round(float(np.median(add)), 3),
             "translation_mm_mean": round(float(np.mean(all_trans)), 3),
             "add_0.1d_success": round(float(np.mean(add < thr)), 4),
+            "top1_pick_success": round(float(np.mean(pick_top1)), 4) if pick_top1 else None,
+            "top3_pick_success": round(float(np.mean(pick_top3)), 4) if pick_top3 else None,
         }
-        print(f"  ADD {report['metrics']['add_mm_mean']} mm | trans {report['metrics']['translation_mm_mean']} mm | "
-              f"ADD_0.1d {report['metrics']['add_0.1d_success']} | recall {report['metrics']['recall']} "
-              f"(matched {total_matched}/{total_gt}){' [refined]' if args.refine else ''}")
+        print(f"  ADD {report['metrics']['add_mm_mean']} mm | ADD_0.1d {report['metrics']['add_0.1d_success']} | "
+              f"recall {report['metrics']['recall']} | top1_pick {report['metrics']['top1_pick_success']} | "
+              f"top3_pick {report['metrics']['top3_pick_success']}"
+              f"{' [refined]' if args.refine else ''}{' [fit-gated]' if args.max_model_fit else ''}")
     else:
         print(f"  ran {len(frames)} frames, no GT labels -> predictions only")
     _write_json(set_dir / "eval_report.json", report)
@@ -309,6 +342,7 @@ def main(argv: list[str] | None = None) -> int:
     p_eval.add_argument("--refine", action="store_true", help="ICP-refine each prediction against its crop")
     p_eval.add_argument("--max-instances", type=int, default=50)
     p_eval.add_argument("--min-confidence", type=float, default=0.0)
+    p_eval.add_argument("--max-model-fit", type=float, default=None, help="Reject poses whose model->crop chamfer/diameter exceeds this.")
     p_eval.add_argument("--crop-radius-fraction", type=float, default=0.75)
     p_eval.set_defaults(func=cmd_evaluate)
 

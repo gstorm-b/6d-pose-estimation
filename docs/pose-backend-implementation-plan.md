@@ -154,6 +154,21 @@ P8 Sim-To-Real Readiness: DONE (2026-06-15)
     <= 0.02) is a multi-hour GPU job left to run on demand; harness + augmentation + config are ready.
 
 WAVE 3 (P7 + P8) COMPLETE. Backend is servable (HTTP) and the sim-to-real gap is measurable.
+
+Dense-pile predicted-path pose gap: DIAGNOSED + MITIGATED (2026-06-15/16). See docs/dense-pile-pose-gap.md.
+  Root cause: train/inference crop-distribution mismatch (pose trained on GT crops -> ADD_0.1d 0.96;
+    infers on predicted-cluster crops -> 0.60). NOT contamination (96.9% pure clusters), NOT a missing
+    symmetry (audit: bending_pipe genuinely asymmetric; x180 oracle does not recover the wrong poses).
+  Fix (inference-time, no retrain): model_fit = posed-model->crop chamfer/diameter, computed per instance
+    in pose_pipeline._model_fit; near-perfect correct-vs-wrong signal (AUC ~0.99, correct ~0.026 vs wrong
+    ~0.81). Added as a dominating confidence term (confidence.py weight 6.0, model_fit_scale 0.05) + an
+    optional InferenceOptions.max_model_fit gate. Ranking/gating only - poses unchanged, GT gates safe.
+  Result (rigorous, Hungarian-matched, prepare_real_eval_set.py evaluate now reports pick success):
+    top-1 pick success ~0.70 -> 1.0, top-3 ~0.90 -> 1.0 on the dense synthetic set; per-instance ADD_0.1d
+    unchanged (0.59) by design. Fit gate 0.05 -> precision ~0.88 keeping ~99% of correct poses.
+  scripts/diagnose_dense_pile_gap.py reproduces the diagnosis. tests/test_confidence.py +model_fit (6/6).
+  Optional next step to raise per-instance precision: retrain pose on predicted crops (export exists;
+    multi-hour job, left on demand). The model-fit fix is object-agnostic and benefits K41144 too.
 ```
 
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:

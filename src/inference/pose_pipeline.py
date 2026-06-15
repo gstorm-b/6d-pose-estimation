@@ -85,6 +85,7 @@ class PosePipeline:
         self.scene_num_points = int(scene_num_points)
         self.device = device
         self.seed = int(seed)
+        self.model_fit_max_points = 2048  # cap crop points used for the model-fit chamfer
 
     @classmethod
     def from_loaded_bundle(cls, loaded: Any, *, seed: int = 7) -> "PosePipeline":
@@ -227,7 +228,31 @@ class PosePipeline:
             keypoint_offsets = outputs["predicted_keypoint_offsets_camera_normalized"].squeeze(0).cpu().numpy()
             keypoint_votes = sampled_points[:, None, :] + keypoint_offsets * diameter
             diagnostics["keypoint_dispersion"] = float(np.mean(np.linalg.norm(keypoint_votes.std(axis=0), axis=1))) / diameter
+
+        # Model-fit: mean distance from each observed crop point to the posed model
+        # surface, normalized by diameter. A wrong pose does not land on its own crop,
+        # so this is the strongest correct-vs-wrong signal on predicted-cluster crops.
+        diagnostics["model_fit"] = self._model_fit(points_camera, rotation, origin)
         return rotation, origin, diagnostics
+
+    def _model_fit(self, crop_points_camera: np.ndarray, rotation: np.ndarray, origin: np.ndarray) -> float:
+        import torch
+
+        crop = np.asarray(crop_points_camera, dtype=np.float32)
+        if crop.shape[0] == 0:
+            return float("inf")
+        if crop.shape[0] > self.model_fit_max_points:
+            idx = np.random.default_rng(self.seed).choice(crop.shape[0], self.model_fit_max_points, replace=False)
+            crop = crop[idx]
+        with torch.no_grad():
+            model = torch.from_numpy(self.model_points_object.astype(np.float32)).to(self.device)
+            rot = torch.from_numpy(rotation.astype(np.float32)).to(self.device)
+            trans = torch.from_numpy(origin.astype(np.float32)).to(self.device)
+            model_camera = model @ rot.T + trans
+            crop_tensor = torch.from_numpy(crop).to(self.device)
+            nearest = torch.cdist(crop_tensor, model_camera).min(dim=1).values
+            fit = float(nearest.mean().item())
+        return fit / max(self.diameter_m, 1e-8)
 
     def infer_from_points(
         self,
@@ -307,6 +332,12 @@ class PosePipeline:
                 inst.diagnostics["confidence_terms"] = sub_scores
             instances.sort(key=lambda inst: (inst.confidence if inst.confidence is not None else -1.0), reverse=True)
 
+        max_model_fit = getattr(options, "max_model_fit", None) if options is not None else None
+        if max_model_fit is not None:
+            instances = [
+                inst for inst in instances
+                if inst.diagnostics.get("model_fit") is None or inst.diagnostics["model_fit"] <= float(max_model_fit)
+            ]
         min_confidence = getattr(options, "min_confidence", None) if options is not None else None
         if min_confidence is not None:
             instances = [inst for inst in instances if (inst.confidence or 0.0) >= float(min_confidence)]

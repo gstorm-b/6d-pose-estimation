@@ -28,6 +28,7 @@ class ConfidenceConfig:
     point_count_ref: float = 400.0           # crop points for a saturated point score
     isolation_ref: float = 0.8               # centroid gap (in diameters) for full isolation score
     refinement_inlier_ref: float = 0.6       # refinement inlier fraction for full score
+    model_fit_scale: float = 0.05            # normalized model->crop chamfer where the score decays
     weights: dict[str, float] = field(
         default_factory=lambda: {
             "center_vote": 1.0,
@@ -36,6 +37,10 @@ class ConfidenceConfig:
             "isolation": 0.5,
             "object_prob": 0.5,
             "refinement": 0.5,
+            # Model-fit (does the posed model land on the observed crop?) is by far
+            # the most discriminative correct-vs-wrong signal on predicted crops, so
+            # it dominates the geometric mean (weight >> the others combined).
+            "model_fit": 6.0,
         }
     )
 
@@ -44,7 +49,7 @@ class ConfidenceConfig:
         if not value:
             return cls()
         base = cls()
-        for key in ("center_dispersion_scale", "keypoint_dispersion_scale", "point_count_ref", "isolation_ref", "refinement_inlier_ref"):
+        for key in ("center_dispersion_scale", "keypoint_dispersion_scale", "point_count_ref", "isolation_ref", "refinement_inlier_ref", "model_fit_scale"):
             if key in value:
                 setattr(base, key, float(value[key]))
         if isinstance(value.get("weights"), dict):
@@ -64,7 +69,7 @@ def compute_instance_confidence(features: dict[str, Any], config: ConfidenceConf
     Recognized feature keys (all optional except the two vote dispersions):
     center_vote_dispersion, keypoint_dispersion (normalized by diameter),
     point_count, cluster_isolation (in diameters), object_probability,
-    refinement_inlier_fraction.
+    refinement_inlier_fraction, model_fit (model->crop chamfer / diameter).
     """
 
     config = config or ConfidenceConfig()
@@ -74,6 +79,8 @@ def compute_instance_confidence(features: dict[str, Any], config: ConfidenceConf
         sub["center_vote"] = float(np.exp(-float(features["center_vote_dispersion"]) / max(config.center_dispersion_scale, 1e-6)))
     if "keypoint_dispersion" in features:
         sub["keypoint"] = float(np.exp(-float(features["keypoint_dispersion"]) / max(config.keypoint_dispersion_scale, 1e-6)))
+    if features.get("model_fit") is not None:
+        sub["model_fit"] = float(np.exp(-float(features["model_fit"]) / max(config.model_fit_scale, 1e-6)))
     if "point_count" in features:
         sub["point_count"] = _saturating(float(features["point_count"]), config.point_count_ref)
     if features.get("cluster_isolation") is not None:

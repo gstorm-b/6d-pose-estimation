@@ -43,6 +43,24 @@ def test_point_count_raises_confidence() -> None:
     assert many > few
 
 
+def test_model_fit_term_dominates() -> None:
+    config = ConfidenceConfig()
+    base = {"center_vote_dispersion": 0.05, "keypoint_dispersion": 0.05, "point_count": 500}
+    good_fit, _ = compute_instance_confidence({**base, "model_fit": 0.02}, config)
+    bad_fit, _ = compute_instance_confidence({**base, "model_fit": 0.5}, config)
+    assert good_fit > bad_fit, "lower model-fit chamfer must raise confidence"
+
+    # A well-fitting pose with otherwise weak signals must still outrank a poorly-
+    # fitting pose with strong other signals (model-fit dominates the geometric mean).
+    well_fit_weak, _ = compute_instance_confidence(
+        {"center_vote_dispersion": 0.15, "keypoint_dispersion": 0.20, "point_count": 60, "model_fit": 0.02}, config
+    )
+    bad_fit_strong, _ = compute_instance_confidence(
+        {"center_vote_dispersion": 0.01, "keypoint_dispersion": 0.01, "point_count": 2000, "model_fit": 0.6}, config
+    )
+    assert well_fit_weak > bad_fit_strong, "model-fit must dominate the other signals"
+
+
 def test_cluster_isolation_values() -> None:
     centroids = np.array([[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [1.0, 0.0, 0.0]])
     iso = cluster_isolation(centroids, diameter_m=0.1)

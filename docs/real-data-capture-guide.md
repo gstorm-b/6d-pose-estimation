@@ -81,16 +81,21 @@ python scripts/prepare_real_eval_set.py export-synthetic \
 python scripts/prepare_real_eval_set.py evaluate --set real-data/bending_synth --sku bending_pipe
 ```
 
-### Known gap: GT crops vs the full predicted pipeline
+### Known gap: GT crops vs the full predicted pipeline (diagnosed + mitigated)
 
-On dense ~40-object piles the **full predicted path** (predicted instance
-segmentation + clustering, then pose) measures markedly worse than the GT-crop
-pose eval that gates releases: ADD ~29 mm / ADD_0.1d ~0.60 / recall ~0.66 vs the
-GT-crop ADD 4.6 mm / ADD_0.1d 0.96. The pose model is sound (GT crops reproduce
-4 mm in-memory); the loss is segmentation quality on dense piles (occluded /
-merged parts). Track this end-to-end number - not just the GT-crop gate - as the
-production-relevant metric, and improve it via clustering, the learned pose
-refiner, or pick-the-top-confidence-only picking rather than every instance.
+On dense ~40-object piles the **full predicted path** measures worse per-instance
+than the GT-crop gate: ADD ~29 mm / ADD_0.1d ~0.60 vs 4.6 mm / 0.96. Root cause is
+a train/inference crop-distribution mismatch (pose trained on GT crops, infers on
+predicted crops), **not** segmentation contamination or a missing symmetry - see
+[dense-pile-pose-gap.md](dense-pile-pose-gap.md) for the full diagnosis.
+
+The operational metric for bin-picking is **top-K pick success**, which the
+evaluate harness now reports. A `model_fit` term (posed-model-to-crop chamfer; a
+near-perfect correct-vs-wrong signal) now dominates the confidence, so the
+top-confidence pick is graspable: **top-1 / top-3 pick success = 1.0** on the
+dense synthetic set (was ~0.70 / ~0.90). Use `--max-model-fit 0.05` to also gate
+the full output to a high-precision set. Raising per-instance ADD_0.1d further
+needs a pose retrain on predicted crops (documented, optional).
 
 ## Narrowing the gap with sim-to-real noise
 
