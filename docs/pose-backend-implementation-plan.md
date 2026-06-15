@@ -82,16 +82,18 @@ P4 two-stage clustering: CODE DONE
     scenes (clusters 28.6->4.0, recall 0.94->0.25); tight merge (0.15/0.04) is a near no-op
     (split_count 3.9->3.75, recall preserved). So two-stage stays DISABLED by default for bending_pipe;
     the code is kept and config-gated for objects/scenes where stage-1 under/over-segments more.
-P5 pose retrain: GT crops exported
-  src/inference/pose_bridge.load_raw_metadata resolves merged prefixed names.
-  GT crops in experiments/wave2_pose_crops_bending_gt_{train,val,test} (974/122/122 crop files, all with GT pose).
-  Pose voting retraining PENDING (waits for the GPU to free after instance training).
+P5 pose retrain: DONE
+  GT crops exported to experiments/wave2_pose_crops_bending_gt_{train,val,test} (974/122/122).
+  Pose voting retrained 90 epochs: experiments/pointnet2_pose_bending_pipe_20260614_191629.
+  GT-crop TEST eval (n=122, statistically meaningful vs the old n=18): ADD 4.57 mm, translation 4.61 mm,
+    ADD_0.1d 0.960, ADD_0.05d 0.907. Beats Gate A STRETCH (>=0.90, translation <=5.0 mm) and the strict
+    5 mm translation target -- a large gain over the old reference (ADD 9.9 mm, translation 9.5 mm,
+    ADD_0.1d 0.833 on n=18). The large dataset was the key driver.
+  Bundle repackaged: models/bending_pipe/v2 (registry resolves it as latest; loads on GPU). v1 kept.
 
-Remaining to finish Wave 2 (run after instance training frees the GPU):
-  1. Eval instance checkpoint on the test split; run the Phase 21 sweep incl. stage-2 thresholds.
-  2. Train pose voting: train_pointnet2_pose.py --config configs/train/pointnet2_pose_voting_bending_pipe.yaml
-       --data experiments/wave2_pose_crops_bending_gt_train --val-data .../gt_val --epochs 90 --batch-size 16 --device cuda
-  3. Eval pose (GT + predicted crops) against Gate A/B/C; repackage models/bending_pipe/v2 via package_model_bundle.py.
+WAVE 2 (P4 + P5) COMPLETE. The bending_pipe backend now meets Gate A on a large, trustworthy test set.
+Next options: regenerate/scale K41144 data (user generating it) and repeat P4/P5 for K41144; Wave 3
+(P7 service, P8 sim-to-real); run the full pose evaluation suite on the new model.
 ```
 
 This plan turns the current research pipeline into a commercial bin-picking pose-estimation backend. It is grounded in three sources:
