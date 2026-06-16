@@ -109,7 +109,26 @@ from src.inference.instance_segmentation import InstanceSegmenter
 seg = InstanceSegmenter.from_loaded_bundle(loaded)          # or from_checkpoint(path)
 res = seg.segment_points(points_camera, features=normals)   # or seg.segment_depth(depth, intr)
 print(res.instance_count, [i.point_count for i in res.instances])
+# Re-cluster a cached forward pass cheaply (no second model run):
+fwd = seg.forward(points_camera, features=normals)
+res = seg.cluster(fwd)                                       # or cluster(fwd, custom_config)
 ```
+
+### Interactive viewer (PySide6 + VTK)
+
+Inspect segmentation results in 3D - run the model, color the cloud per instance,
+click an instance to isolate it, show centroids, and re-tune the clustering
+thresholds live (re-clustering reuses the cached forward pass):
+
+```bash
+python scripts/view_instance_segmentation.py --sku bending_pipe \
+    --scene processed-data/pointnet2_semseg_bending_pipe_wave2/test/<sample>.npz
+```
+
+Pick the model (registry SKU or a checkpoint) and open any scene `.npz`
+(points/points_camera + optional features). To just view a saved colored cloud
+without re-running the model, open `segmentation.ply` (from the CLI above) in the
+generic `scripts/view_ply_pyside_vtk.py`.
 
 ## 4. Evaluate on a frame folder (synthetic or real)
 

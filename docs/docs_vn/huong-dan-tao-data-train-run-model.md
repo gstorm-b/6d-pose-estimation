@@ -58,7 +58,7 @@ python .\scripts\package_model_bundle.py --sku bending_pipe --version v2 --insta
 ```
 
 - **Chạy end-to-end KHÔNG cần export crop thủ công**: dùng library `src/inference/pose_pipeline.py` (scene point cloud / depth → ranked `object_to_camera`) hoặc HTTP service `scripts/run_backend_service.py`. Hướng dẫn dùng đầy đủ: **docs/usage-guide.md**. API HTTP: **docs/backend-api.md**.
-- **Instance segmentation độc lập**: `scripts/run_instance_segmentation.py` (từ bundle `--sku` hoặc checkpoint thô `--checkpoint`; input depth/points; output labels + clusters + PLY màu + mask 2D).
+- **Instance segmentation độc lập**: `scripts/run_instance_segmentation.py` (từ bundle `--sku` hoặc checkpoint thô `--checkpoint`; input depth/points; output labels + clusters + PLY màu + mask 2D). Xem trực quan kết quả bằng app `scripts/view_instance_segmentation.py` (PySide6+VTK: chạy model, tô màu theo instance, click để isolate, hiện centroid, tinh chỉnh clustering live).
 - **Confidence + chọn pick**: confidence giờ có term `model_fit` (chamfer model-đã-pose → crop) — pose sai bị hạ rank mạnh; **top-1 pick success ~1.0** trên pile dày. Option `max_model_fit` để gate. Chi tiết: **docs/dense-pile-pose-gap.md**.
 - **Eval trên folder frame (synthetic/real)**: `scripts/prepare_real_eval_set.py` (export-synthetic / evaluate / label; báo ADD/ADD_0.1d/recall/top-K pick). Hướng dẫn capture real: **docs/real-data-capture-guide.md**.
 - **Sim-to-real noise** (P8): bật bằng `configs/train/pointnet2_instance_bending_pipe_sim2real.yaml` (structured-light noise: along-ray range², quantization, grazing/edge/blob dropout — mặc định tắt ở config gốc).
