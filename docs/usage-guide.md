@@ -114,21 +114,29 @@ fwd = seg.forward(points_camera, features=normals)
 res = seg.cluster(fwd)                                       # or cluster(fwd, custom_config)
 ```
 
-### Interactive viewer (PySide6 + VTK)
+### Interactive viewer (PySide6 + VTK) — segmentation AND pose
 
-Inspect segmentation results in 3D - run the model, color the cloud per instance,
-click an instance to isolate it, show centroids, and re-tune the clustering
-thresholds live (re-clustering reuses the cached forward pass):
+One app inspects both stages in 3D:
 
 ```bash
 python scripts/view_instance_segmentation.py --sku bending_pipe \
     --scene processed-data/pointnet2_semseg_bending_pipe_wave2/test/<sample>.npz
 ```
 
-Pick the model (registry SKU or a checkpoint) and open any scene `.npz`
-(points/points_camera + optional features). To just view a saved colored cloud
-without re-running the model, open `segmentation.ply` (from the CLI above) in the
-generic `scripts/view_ply_pyside_vtk.py`.
+Pick the model (registry SKU, or a raw instance checkpoint for segmentation only)
+and open any scene `.npz` (points/points_camera + optional features), then:
+
+- **Run segmentation** — cloud colored per instance, click an instance to isolate,
+  show centroids, and re-tune object-prob / dbscan-eps / min-cluster-points live
+  (re-clustering reuses the cached forward pass).
+- **Run pose** — overlays each object's posed model points + pose axes (red=x,
+  green=y, blue=z) on a dimmed scene, ranked by confidence; click an instance to
+  isolate its pose. This is the standard 6D-pose eyeball: does the posed model
+  snap onto the observed points? Lower `model_fit` = better fit.
+
+To just view a saved colored cloud without re-running the model, open
+`segmentation.ply` (from the CLI above) in the generic
+`scripts/view_ply_pyside_vtk.py`.
 
 ## 4. Evaluate on a frame folder (synthetic or real)
 
