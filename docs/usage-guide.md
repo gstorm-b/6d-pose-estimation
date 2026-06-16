@@ -129,10 +129,11 @@ and open any scene `.npz` (points/points_camera + optional features), then:
 - **Run segmentation** — cloud colored per instance, click an instance to isolate,
   show centroids, and re-tune object-prob / dbscan-eps / min-cluster-points live
   (re-clustering reuses the cached forward pass).
-- **Run pose** — overlays each object's posed model points + pose axes (red=x,
-  green=y, blue=z) on a dimmed scene, ranked by confidence; click an instance to
-  isolate its pose. This is the standard 6D-pose eyeball: does the posed model
-  snap onto the observed points? Lower `model_fit` = better fit.
+- **Run pose** — colors the observed scene points per instance (background grey)
+  and overlays each object's posed model (a brighter tint) + pose axes (red=x,
+  green=y, blue=z), ranked by confidence; click an instance to isolate its pose.
+  This is the standard 6D-pose eyeball: does the posed model snap onto the
+  observed points? Lower `model_fit` = better fit.
 
 To just view a saved colored cloud without re-running the model, open
 `segmentation.ply` (from the CLI above) in the generic

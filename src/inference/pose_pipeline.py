@@ -42,6 +42,7 @@ class ScenePoseInstance:
     crop_centroid_camera: np.ndarray
     matched_gt_iou: float | None = None
     confidence: float | None = None
+    point_indices: np.ndarray | None = None  # indices into the scene points fed to infer_from_points
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
@@ -313,6 +314,7 @@ class PosePipeline:
                         np.asarray(crop.points_camera, dtype=np.float32)
                     ).mean(axis=0),
                     matched_gt_iou=crop.matched_gt_iou,
+                    point_indices=np.asarray(crop.point_indices, dtype=np.int64),
                     diagnostics=dict(diagnostics),
                 )
             )

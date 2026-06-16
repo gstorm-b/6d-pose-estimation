@@ -73,7 +73,6 @@ _PALETTE = np.array(
     dtype=np.uint8,
 )
 _BACKGROUND_COLOR = np.array([70, 75, 82], dtype=np.uint8)
-_SCENE_DIM_COLOR = np.array([55, 60, 66], dtype=np.uint8)
 _AXIS_COLORS = np.array([[235, 60, 60], [60, 220, 90], [70, 130, 245]], dtype=np.uint8)  # x, y, z
 
 
@@ -93,6 +92,11 @@ def _flip_to_positive_forward(points_metadata: np.ndarray) -> np.ndarray:
     out = np.asarray(points_metadata, dtype=np.float32).copy()
     out[..., 2] *= -1.0
     return out
+
+
+def _brighten(color: np.ndarray) -> np.ndarray:
+    """A pale, brighter tint of an instance color so the posed model stands out."""
+    return (color.astype(np.float32) * 0.45 + 255.0 * 0.55).astype(np.uint8)
 
 
 # --------------------------------------------------------------------------- worker
@@ -305,6 +309,7 @@ class BackendViewer(QMainWindow):
         self.seg_result = None
         self.pose_result = None
         self.pose_items: list[dict[str, Any]] = []
+        self.pose_scene_labels = np.zeros(0, dtype=np.int64)
         self.mode = "seg"  # "seg" or "pose"
         self._token = 0
         self._threads: list[QThread] = []
@@ -579,6 +584,12 @@ class BackendViewer(QMainWindow):
                 "origin": origin_pf, "axis_ends": axis_ends, "confidence": float(inst.confidence or 0.0),
                 "model_fit": float(inst.diagnostics.get("model_fit", float("nan"))), "point_count": int(inst.point_count),
             })
+        # Per-point instance labels for the observed scene cloud (0 = background).
+        labels = np.zeros(self.scene_points.shape[0], dtype=np.int64)
+        for inst in result.instances:
+            if inst.point_indices is not None:
+                labels[np.asarray(inst.point_indices, dtype=np.int64)] = int(inst.instance_id)
+        self.pose_scene_labels = labels
         self._populate_pose_list()
         self.refresh_view(reset_camera=True)
         self.statusBar().showMessage(
@@ -622,11 +633,26 @@ class BackendViewer(QMainWindow):
             self.vtk.set_centroids(centroids, ccolors, max(self.diameter, 1e-3) * 0.12)
         self.on_instance_selected(self.instance_list.currentItem(), None)
 
+    def _current_instance_id(self) -> int:
+        item = self.instance_list.currentItem()
+        return int(item.data(Qt.ItemDataRole.UserRole)) if item is not None else -1
+
+    def _pose_scene_colors(self, selected: int) -> np.ndarray:
+        """Observed scene points colored per instance (background grey); dim all but
+        the selected instance when one is isolated."""
+        colors = instance_colors(self.pose_scene_labels)
+        if selected >= 0:
+            dimmed = (colors.astype(np.float32) * 0.18).astype(np.uint8)
+            keep = self.pose_scene_labels == selected
+            colors = colors.copy()
+            colors[~keep] = dimmed[~keep]
+        return colors
+
     def _render_pose(self, reset_camera: bool) -> None:
-        # Dim grey observed scene; the posed models pop on top.
-        pts = self.scene_points
-        dim = np.tile(_SCENE_DIM_COLOR, (pts.shape[0], 1))
-        self.vtk.set_scene(pts, dim, max(1, self.point_size.value() - 1), keep_camera=not reset_camera)
+        # Observed scene colored per instance (background grey); posed models on top.
+        selected = self._current_instance_id()
+        self.vtk.set_scene(self.scene_points, self._pose_scene_colors(selected),
+                           self.point_size.value(), keep_camera=not reset_camera)
         self._render_pose_overlay()
 
     def _render_pose_overlay(self) -> None:
@@ -636,7 +662,7 @@ class BackendViewer(QMainWindow):
         items = self.pose_items if selected < 0 else [it for it in self.pose_items if it["id"] == selected]
         if self.show_model.isChecked() and self.model_points is not None and items:
             model_pts = np.concatenate([it["model_pf"] for it in items], axis=0)
-            model_cols = np.concatenate([np.tile(it["color"], (it["model_pf"].shape[0], 1)) for it in items], axis=0)
+            model_cols = np.concatenate([np.tile(_brighten(it["color"]), (it["model_pf"].shape[0], 1)) for it in items], axis=0)
             self.vtk.set_overlay_points(model_pts, model_cols, self.point_size.value() + 2)
         else:
             self.vtk.set_overlay_points(None, None, 0)
@@ -653,6 +679,7 @@ class BackendViewer(QMainWindow):
             return
         instance_id = int(current.data(Qt.ItemDataRole.UserRole))
         if self.mode == "pose":
+            self.vtk.recolor_scene(self._pose_scene_colors(instance_id))
             self._render_pose_overlay()
             self.details.setPlainText(self._pose_details(instance_id))
             return
