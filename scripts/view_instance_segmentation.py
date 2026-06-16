@@ -264,6 +264,7 @@ class InstanceSegViewer(QMainWindow):
         self._token = 0
         self._threads: list[QThread] = []
         self._workers: list[QObject] = []
+        self._callbacks: dict[int, Callable[[Any], None]] = {}
 
         self._build_ui()
         if args.sku:
@@ -362,32 +363,45 @@ class InstanceSegViewer(QMainWindow):
     def _run_async(self, fn: Callable[[], Any], on_done: Callable[[Any], None], busy: str) -> None:
         self._token += 1
         token = self._token
+        self._callbacks[token] = on_done
         self.statusBar().showMessage(busy)
         self._set_busy(True)
         worker = CallableWorker(token, fn)
         thread = QThread(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-
-        def _done(tok: int, obj: Any) -> None:
-            if tok == self._token:
-                self._set_busy(False)
-                on_done(obj)
-            thread.quit()
-
-        def _failed(tok: int, msg: str) -> None:
-            if tok == self._token:
-                self._set_busy(False)
-                self.statusBar().showMessage(f"Error: {msg}")
-                self.details.setPlainText(msg)
-            thread.quit()
-
-        worker.done.connect(_done)
-        worker.failed.connect(_failed)
-        thread.finished.connect(lambda: self._cleanup(thread, worker))
+        # Connect to bound-method slots on this main-thread window. Qt then uses a
+        # QUEUED connection (emitter is in the worker thread, receiver in the GUI
+        # thread), so the result - and any VTK/Qt rendering it triggers - runs on
+        # the GUI thread. Connecting to a plain closure would default to a DIRECT
+        # connection and run VTK in the worker thread, which opens a second GL
+        # window and crashes.
+        worker.done.connect(self._on_async_done)
+        worker.failed.connect(self._on_async_failed)
+        worker.done.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(lambda t=thread, w=worker: self._cleanup(t, w))
         self._threads.append(thread)
         self._workers.append(worker)
         thread.start()
+
+    @Slot(int, object)
+    def _on_async_done(self, token: int, payload: Any) -> None:
+        callback = self._callbacks.pop(token, None)
+        if token != self._token:
+            return
+        self._set_busy(False)
+        if callback is not None:
+            callback(payload)
+
+    @Slot(int, str)
+    def _on_async_failed(self, token: int, message: str) -> None:
+        self._callbacks.pop(token, None)
+        if token != self._token:
+            return
+        self._set_busy(False)
+        self.statusBar().showMessage(f"Error: {message}")
+        self.details.setPlainText(message)
 
     def _cleanup(self, thread: QThread, worker: QObject) -> None:
         for store in (self._threads, self._workers):
