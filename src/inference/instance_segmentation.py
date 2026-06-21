@@ -54,6 +54,20 @@ class InstanceSegmentationResult:
         return len(self.instances)
 
 
+@dataclass
+class SceneForward:
+    """Cached model-forward output for a scene, so clustering can be re-run cheaply."""
+
+    points_camera: np.ndarray         # (N, 3) subsampled scene points
+    points_normalized: np.ndarray     # (N, 3) scene-centered points fed to clustering
+    center: np.ndarray                # (1, 3) subtracted center
+    object_probabilities: np.ndarray  # (N,)
+    offsets: np.ndarray               # (N, 3) per-point center-vote offsets
+    pixels: np.ndarray | None
+    source_point_count: int
+    inference_ms: float
+
+
 class InstanceSegmenter:
     """Load the instance model once and segment scenes into object instances."""
 
@@ -141,14 +155,14 @@ class InstanceSegmenter:
             None if pixels is None else pixels[keep],
         )
 
-    def segment_points(
+    def forward(
         self,
         points_camera: np.ndarray,
         features: np.ndarray | None = None,
         *,
         pixels: np.ndarray | None = None,
-    ) -> InstanceSegmentationResult:
-        """Segment a scene point cloud (positive-forward camera frame) into instances."""
+    ) -> SceneForward:
+        """Run the instance model on a scene (the slow GPU step). Cache + re-cluster cheaply."""
 
         import torch
 
@@ -157,7 +171,6 @@ class InstanceSegmenter:
         source_count = points.shape[0]
         points, feats, pixels = self._subsample(points, feats, pixels)
 
-        timings: dict[str, float] = {}
         t0 = time.perf_counter()
         center = points.mean(axis=0, keepdims=True).astype(np.float32)
         points_normalized = points - center
@@ -167,17 +180,37 @@ class InstanceSegmenter:
             outputs = self.instance_model(tensor)
             probabilities = torch.softmax(outputs["semantic_logits"], dim=-1).squeeze(0).cpu().numpy()
             offsets = outputs["offsets"].squeeze(0).cpu().numpy().astype(np.float32)
-        timings["inference_ms"] = (time.perf_counter() - t0) * 1000.0
-
         object_probabilities = (
             probabilities[:, 1] if self.num_classes > 1 else np.zeros(points.shape[0], dtype=np.float32)
+        ).astype(np.float32)
+        return SceneForward(
+            points_camera=points,
+            points_normalized=points_normalized.astype(np.float32),
+            center=center,
+            object_probabilities=object_probabilities,
+            offsets=offsets,
+            pixels=pixels,
+            source_point_count=source_count,
+            inference_ms=(time.perf_counter() - t0) * 1000.0,
         )
-        t1 = time.perf_counter()
-        clustered = cluster_voted_centers(points_normalized, object_probabilities, offsets, self.clustering)
-        timings["clustering_ms"] = (time.perf_counter() - t1) * 1000.0
 
+    def cluster(
+        self,
+        forward: SceneForward,
+        clustering: VotedCenterClusteringConfig | None = None,
+    ) -> InstanceSegmentationResult:
+        """Cluster a cached forward pass into instances (the fast CPU step)."""
+
+        config = clustering or self.clustering
+        t1 = time.perf_counter()
+        clustered = cluster_voted_centers(
+            forward.points_normalized, forward.object_probabilities, forward.offsets, config
+        )
+        clustering_ms = (time.perf_counter() - t1) * 1000.0
+
+        points = forward.points_camera
         labels = np.asarray(clustered["instance_labels"], dtype=np.int64)
-        voted_centers_camera = np.asarray(clustered["voted_centers"], dtype=np.float32) + center
+        voted_centers_camera = np.asarray(clustered["voted_centers"], dtype=np.float32) + forward.center
 
         instances: list[SegmentedInstance] = []
         for instance_id in sorted(int(v) for v in np.unique(labels) if int(v) > 0):
@@ -191,20 +224,31 @@ class InstanceSegmenter:
                     centroid_camera=cluster_points.mean(axis=0),
                     bbox_min_camera=cluster_points.min(axis=0),
                     bbox_max_camera=cluster_points.max(axis=0),
-                    mean_object_probability=float(object_probabilities[idx].mean()),
+                    mean_object_probability=float(forward.object_probabilities[idx].mean()),
                 )
             )
         instances.sort(key=lambda inst: inst.point_count, reverse=True)
         return InstanceSegmentationResult(
             points_camera=points,
             instance_labels=labels,
-            object_probabilities=object_probabilities.astype(np.float32),
+            object_probabilities=forward.object_probabilities,
             voted_centers_camera=voted_centers_camera,
             instances=instances,
-            timings_ms=timings,
-            pixels=pixels,
-            source_point_count=source_count,
+            timings_ms={"inference_ms": forward.inference_ms, "clustering_ms": clustering_ms},
+            pixels=forward.pixels,
+            source_point_count=forward.source_point_count,
         )
+
+    def segment_points(
+        self,
+        points_camera: np.ndarray,
+        features: np.ndarray | None = None,
+        *,
+        pixels: np.ndarray | None = None,
+    ) -> InstanceSegmentationResult:
+        """Segment a scene point cloud (positive-forward camera frame) into instances."""
+
+        return self.cluster(self.forward(points_camera, features, pixels=pixels))
 
     def segment_depth(
         self,
