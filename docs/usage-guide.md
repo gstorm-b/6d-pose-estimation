@@ -124,7 +124,10 @@ python scripts/view_instance_segmentation.py --sku bending_pipe \
 ```
 
 Pick the model (registry SKU, or a raw instance checkpoint for segmentation only)
-and open any scene `.npz` (points/points_camera + optional features), then:
+and open a scene — an `.npz` (points/points_camera + optional features) or a real
+camera `.pcd` (auto-converted to metres + the positive-forward frame, with normals
+estimated away from the camera to match the training convention, and subsampled to
+the model size). Then:
 
 - **Run segmentation** — cloud colored per instance, click an instance to isolate,
   show centroids, and re-tune object-prob / dbscan-eps / min-cluster-points live

@@ -112,6 +112,33 @@ def test_real_bundle_segmentation() -> None:
     assert all(np.all(np.isfinite(inst.centroid_camera)) for inst in result.instances)
 
 
+def test_load_scene_pcd_convention() -> None:
+    """The .pcd loader must produce positive-forward points + away-from-camera
+    normals (the synthetic convention the instance model fires on)."""
+    pcd = PROJECT_ROOT / "real-data" / "scene_001.pcd"
+    if not pcd.exists():
+        print("  (skip: no real-data/scene_001.pcd)")
+        return
+    try:
+        import open3d  # noqa: F401
+    except Exception:  # noqa: BLE001
+        print("  (skip: open3d not installed)")
+        return
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("_vis", PROJECT_ROOT / "scripts" / "view_instance_segmentation.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    points, normals, info = module._load_scene_pcd(pcd, target_points=16384)
+    assert points.shape[0] <= 16384 and points.shape[1] == 3
+    assert normals.shape == points.shape
+    assert np.all(np.isfinite(points)) and np.all(np.isfinite(normals))
+    assert np.median(points[:, 2]) > 0, "points must be positive-forward (z > 0)"
+    assert np.median(normals[:, 2]) > 0, "normals must point away from the camera (z > 0)"
+    print(f"  pcd loader: {info['raw_points']}->{points.shape[0]} pts, in_mm={info['in_mm']}, flip_z={info['flip_z']}")
+
+
 def _run_all() -> int:
     tests = [v for n, v in sorted(globals().items()) if n.startswith("test_") and callable(v)]
     failures = 0
