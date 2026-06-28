@@ -1,0 +1,122 @@
+{
+  "model": "object-model\\K41144.stl",
+  "class_name": "K41144",
+  "model_scale": 1.0,
+  "output": "D:/Project/6d-pose-estimation/synthetic-data/k41144_5",
+  "samples": 200,
+  "objects": 50,
+  "width": 640,
+  "height": 480,
+  "depth_camera_location": [
+    0.0,
+    -0.03,
+    0.55
+  ],
+  "depth_camera_target": [
+    0.0,
+    0.0,
+    0.025
+  ],
+  "depth_camera_lens": 35.0,
+  "rgb_camera_location": [
+    0.0,
+    -0.03,
+    0.55
+  ],
+  "rgb_camera_target": [
+    0.0,
+    0.0,
+    0.025
+  ],
+  "rgb_camera_lens": 35.0,
+  "debug_camera_location": [
+    0.45,
+    -0.55,
+    0.55
+  ],
+  "debug_camera_target": [
+    0.0,
+    0.0,
+    0.06
+  ],
+  "debug_camera_lens": 22.0,
+  "light_location": [
+    0.0,
+    -0.22,
+    0.55
+  ],
+  "light_energy": 90.0,
+  "light_size": 0.45,
+  "bin_x": 0.3,
+  "bin_y": 0.2,
+  "bin_wall_height": 0.14,
+  "spawn_mode": "progressive",
+  "drop_clearance_min": 0.03,
+  "drop_clearance_max": 0.12,
+  "progressive_settle_frames": 35,
+  "final_relax_frames": 50,
+  "progressive_freeze": false,
+  "grid_spacing": 0.01,
+  "grid_drop_clearance": 0.001,
+  "grid_jitter": 0.0,
+  "grid_layers": 0,
+  "grid_orientation": null,
+  "drop_height_min": 0.12,
+  "drop_height_max": 0.34,
+  "spawn_strategy": "layered",
+  "objects_per_layer": 6,
+  "spawn_min_distance": 0.045,
+  "spawn_settle_frames": 35,
+  "collision_margin": 0.0005,
+  "collision_shape": "CONVEX_HULL",
+  "object_mass": 0.08,
+  "object_friction": 0.2,
+  "object_restitution": 0.05,
+  "object_linear_damping": 0.05,
+  "object_angular_damping": 0.15,
+  "object_color": [
+    0.015,
+    0.014,
+    0.013
+  ],
+  "object_metallic": 0.85,
+  "object_roughness": 0.85,
+  "bin_friction": 0.5,
+  "bin_restitution": 0.05,
+  "bin_floor_thickness": 0.01,
+  "bin_wall_thickness": 0.02,
+  "bin_color": [
+    0.12,
+    0.12,
+    0.115
+  ],
+  "bin_roughness": 0.82,
+  "gravity": -9.81,
+  "physics_substeps": 60,
+  "physics_solver_iterations": 30,
+  "camera_sensor_width": 32.0,
+  "camera_clip_start": 0.01,
+  "camera_clip_end": 1.5,
+  "cycles_samples": 48,
+  "view_transform": "Filmic",
+  "view_look": "Medium High Contrast",
+  "view_exposure": -1.2,
+  "view_gamma": 1.0,
+  "light_type": "AREA",
+  "world_color": [
+    0.018,
+    0.018,
+    0.02
+  ],
+  "min_visible_objects": 40,
+  "min_visible_points": 24000,
+  "max_sample_attempts": 8,
+  "out_of_bin_tolerance": 0.015,
+  "out_of_bin_min_z": -0.04,
+  "settle_frames": 220,
+  "record_simulation_video": false,
+  "record_failed_video": false,
+  "simulation_video_frame_step": 4,
+  "simulation_video_fps": 24,
+  "allow_out_of_bin_filtering": false
+}
