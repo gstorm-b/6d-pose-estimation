@@ -155,7 +155,23 @@ If validation fails:
 
 ## Review Train-Time Noise
 
-Augmentation runs only inside the DataLoader, so to see what the model actually trains on, render a processed sample clean-vs-noisy:
+Augmentation runs only inside the DataLoader, so it is not baked into `synthetic-data/` or `processed-data/`. Use the GUI when tuning values to match a real sensor:
+
+```powershell
+python .\scripts\noise_tuning_gui.py
+```
+
+Recommended workflow:
+
+- Load a processed dataset folder such as `processed-data/pointnet2_semseg_k41144` or `processed-data/pointnet2_semseg_bending_pipe`.
+- Load the train YAML you plan to use. The GUI reads `dataset.root`, `dataset.normalize`, and the nested `augment` block.
+- Adjust jitter, depth noise, dropout, outlier, edge/grazing/blob dropout, quantization, and camera fallback parameters while reviewing the VTK `3D Point Cloud` tab and displacement/label-change stats.
+- Use `side-by-side` to compare clean/noisy clouds, or `overlay` to see noisy points on top of the clean cloud from the same camera angle. The older `2D Projection` tab remains useful for a quick top/front/side check.
+- Save either an augment-only YAML preset or a full train config copy. `Update Config` can overwrite the loaded config's `augment` block, but YAML comments may not be preserved.
+
+The preview applies the same `src/data/augmentation.py` implementation used by training. For `scene_center` normalization, it previews the normalized cloud and passes the camera position in the same frame, matching the instance segmentation DataLoader path.
+
+For an Open3D clean-vs-noisy view or PLY export:
 
 ```powershell
 python .\scripts\view_augmented_point_cloud.py .\processed-data\pointnet2_semseg_k41144\test\sample_000011.npz --config .\configs\train\pointnet2_semseg_k41144.yaml

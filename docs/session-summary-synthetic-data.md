@@ -231,6 +231,26 @@ Useful options:
 
 ### Augmented Point Cloud Viewer
 
+GUI script:
+
+```text
+scripts/noise_tuning_gui.py
+```
+
+Purpose:
+
+- Tune the `dataset.augment` YAML block visually against processed samples without editing YAML by hand.
+- Load a processed dataset root plus a train config, then preview clean/noisy point clouds in the VTK `3D Point Cloud` tab with displacement and label-change stats.
+- The 3D view supports `side-by-side` clean/noisy comparison and `overlay` mode; the older 2D projection tab is retained as a quick orthographic check.
+- Read `dataset.root`, `dataset.normalize`, and `dataset.augment`; preview uses the same `src/data/augmentation.py` path as training. With `scene_center`, the GUI previews the normalized point cloud and supplies camera position in the normalized frame for camera-dependent sim-to-real noise.
+- Save either an augment-only preset YAML or a full train config copy; in-place update is available but YAML comments may not be preserved.
+
+Example:
+
+```powershell
+python .\scripts\noise_tuning_gui.py
+```
+
 Viewer script:
 
 ```text

@@ -267,6 +267,31 @@ point_pixels
 raw_sample
 ```
 
+## 5.5. Tune noise/augmentation cho processed data
+
+Noise khi train chỉ chạy trong DataLoader, không được ghi trực tiếp vào `synthetic-data/` hoặc `processed-data/`. Khi cần chỉnh noise cho giống camera thật hơn, dùng app:
+
+```powershell
+python .\scripts\noise_tuning_gui.py
+```
+
+Workflow khuyến nghị:
+
+- Chọn processed dataset, ví dụ `processed-data/pointnet2_semseg_k41144` hoặc `processed-data/pointnet2_semseg_bending_pipe`.
+- Load train config sẽ dùng để train. App tự đọc `dataset.root`, `dataset.normalize`, và block `dataset.augment`.
+- Điều chỉnh các tham số jitter, depth noise, point dropout, outlier, normal jitter, z-rotation, quantization, grazing/edge/blob dropout, camera fallback.
+- Xem tab VTK `3D Point Cloud` và phần stats: số point bị dịch, mean/p95/max displacement, semantic changed, object->background.
+- Dùng `side-by-side` để so clean/noisy tách nhau, hoặc `overlay` để đặt noisy cloud lên clean cloud cùng một góc nhìn. Tab `2D Projection` vẫn giữ lại để kiểm tra nhanh top/front/side.
+- Lưu `augment` preset YAML hoặc lưu ra một train config mới. Nút `Update Config` ghi đè block `augment` trong config đang load, nhưng comment YAML có thể bị mất.
+
+App dùng đúng implementation `src/data/augmentation.py` như training. Với `normalize: scene_center`, preview sẽ dùng cloud đã normalize và camera position trong cùng frame, sát với path của instance segmentation DataLoader.
+
+Nếu cần xem 3D bằng Open3D hoặc export PLY clean/noisy:
+
+```powershell
+python .\scripts\view_augmented_point_cloud.py .\processed-data\pointnet2_semseg_k41144\test\sample_000011.npz --config .\configs\train\pointnet2_semseg_k41144.yaml
+```
+
 ## 6. Train Instance Segmentation
 
 ### 6.1. Smoke test trước khi train full
