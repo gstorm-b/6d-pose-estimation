@@ -1,10 +1,10 @@
 # Hướng Dẫn Tạo Data, Train Và Chạy Model
 
-Ngày cập nhật: 2026-06-16
+Ngày cập nhật: 2026-06-30
 
 Trạng thái: pipeline research đã hoàn thành đến pose Phase 23; đã bổ sung dataset lớn (Wave 2) và backend phục vụ model (Wave 1-3: registry/bundle, library pipeline, HTTP service, instance-seg tool, eval harness). Backbone pose chính là PointNet++ theo hướng PS6D-style keypoint/center voting. Refinement bằng ICP và learned translation refiner đã có, nhưng phải báo cáo tách biệt với raw pose.
 
-**Đọc section "Cập Nhật 2026-06-16" ngay dưới đây trước** — nó chứa reference checkpoint/metric MỚI, cách gộp dataset lớn, cách đóng gói + chạy backend, và các kết quả âm KHÔNG nên lặp lại. Phần còn lại (mục 1-21) vẫn đúng cho pipeline cơ bản.
+**Đọc section "Cập Nhật 2026-06-30" và "Cập Nhật 2026-06-16" ngay dưới đây trước** — chúng chứa reference checkpoint/metric MỚI, cách gộp dataset lớn, cách đóng gói + chạy backend, và các kết quả âm KHÔNG nên lặp lại. Phần còn lại (mục 1-21) vẫn đúng cho pipeline cơ bản.
 
 Tài liệu này là runbook tiếng Việt để engineer có thể dựng lại toàn bộ pipeline:
 
@@ -19,6 +19,108 @@ Blender synthetic data
   -> optional learned translation refiner
   -> full pose evaluation suite
 ```
+
+## Cập Nhật 2026-06-30 (K41144 Wave 2 từ k41144_1..k41144_8)
+
+K41144 đã được chạy theo quy trình Wave 2 từ các raw roots:
+
+```text
+synthetic-data/k41144_1 ... synthetic-data/k41144_8
+```
+
+Raw validation:
+
+```text
+k41144_1: 200/200 OK, 30 visible objects
+k41144_2: 0/200 OK do SPARSE, nhưng không corrupt; 10 visible objects, no out-of-bin
+k41144_3: 200/200 OK, 20 visible objects
+k41144_4: 200/200 OK, 3 visible objects
+k41144_5: 107/107 OK, 50 visible objects
+k41144_6: 200/200 OK, 8 visible objects
+k41144_7: 200/200 OK, 8 visible objects
+k41144_8: 87/88 OK; sample_000087 thiếu toàn bộ file raw
+```
+
+Converter đã có thêm flag opt-in:
+
+```text
+--skip-invalid-samples
+```
+
+Flag này chỉ bỏ qua sample folder thiếu file bắt buộc khi merge multi-root trusted data; default vẫn strict. Lệnh đã dùng:
+
+```powershell
+python .\scripts\prepare_pointnet2_semseg_dataset.py --raw .\synthetic-data\k41144_1 .\synthetic-data\k41144_2 .\synthetic-data\k41144_3 .\synthetic-data\k41144_4 .\synthetic-data\k41144_5 .\synthetic-data\k41144_6 .\synthetic-data\k41144_7 .\synthetic-data\k41144_8 --out .\processed-data\pointnet2_semseg_k41144_wave2 --num-points 16384 --use-normals --object-fraction-target 0.65 --train-ratio 0.8 --val-ratio 0.1 --test-ratio 0.1 --seed 7 --skip-raw-validation --skip-invalid-samples
+```
+
+Processed dataset:
+
+```text
+processed-data/pointnet2_semseg_k41144_wave2
+samples: 1394
+split train/val/test: 1115/139/140
+visible_instances min/median/max: 3/10/50
+skipped: synthetic-data/k41144_8/sample_000087
+```
+
+Instance checkpoint tạm thời:
+
+```text
+experiments/pointnet2_instance_k41144_wave2_20260630_231537/checkpoints/best.pt
+training: 3 epochs, batch_size=4, device=cuda, num_workers=0
+test semantic object_iou: 0.9932
+test instance_precision: 0.8676
+test instance_recall: 0.8054
+test instance_mean_iou: 0.8600
+```
+
+Pose crop exports:
+
+```text
+GT train: experiments/wave2_pose_crops_k41144_gt_train, 18579 crops
+GT val:   experiments/wave2_pose_crops_k41144_gt_val, 2251 crops
+GT test:  experiments/wave2_pose_crops_k41144_gt_test, 2495 crops
+Pred test from new instance: experiments/wave2_pose_crops_k41144_pred_test, 2181 crops
+Pred matched_gt_iou mean: 0.7182
+Pred matched_gt_iou >= 0.5: 1774/2181
+```
+
+Pose checkpoint:
+
+```text
+experiments/pointnet2_pose_k41144_20260630_233852/checkpoints/best_add.pt
+source: fine-tuned 1 epoch from experiments/pointnet2_pose_k41144_20260608_023605/checkpoints/best_add.pt
+```
+
+GT-crop pose comparison on Wave 2 test:
+
+```text
+old checkpoint:       ADD 4.406 mm, translation 4.434 mm, ADD_0.1d 0.973
+fine-tuned checkpoint ADD 3.099 mm, translation 3.199 mm, ADD_0.1d 0.961
+```
+
+Predicted-crop pose with fine-tuned checkpoint:
+
+```text
+matched_gt_iou >= 0.5:
+  ADD 6.096 mm, translation 5.730 mm, ADD_0.1d 0.849
+all predicted:
+  ADD 10.817 mm, translation 11.280 mm, ADD_0.1d 0.732
+```
+
+Interpretation:
+
+- Fine-tuning improves GT-crop ADD/translation substantially, but slightly lowers GT-crop ADD_0.1d versus the old checkpoint.
+- Full predicted path is now limited mainly by instance crop quality, especially the dense 50-object scenes in `k41144_5`.
+- Treat the 2026-06-30 checkpoints as **provisional**, not production-promoted, until the backlog below is complete.
+
+Backlog:
+
+1. Run longer instance training/sign-off (baseline target: original 50 epochs or early stop) and tune DBSCAN/min-cluster settings on Wave 2.
+2. Run longer pose fine-tune and keep both selection criteria visible: best ADD and ADD_0.1d.
+3. Run optional hybrid refinement on Wave 2 GT/predicted cases and report raw/refined separately.
+4. Run Phase 21 K41144 predicted-crop sweep on `pointnet2_semseg_k41144_wave2`.
+5. Package K41144 bundle v2 only after predicted-crop/full-pipeline metrics improve stably.
 
 ## Cập Nhật 2026-06-16 (Backend + Wave 2/3 — đọc trước)
 
@@ -266,6 +368,68 @@ instance_labels
 point_pixels
 raw_sample
 ```
+
+## 5.5. Tune noise/augmentation cho processed data
+
+Noise khi train chỉ chạy trong DataLoader, không được ghi trực tiếp vào `synthetic-data/` hoặc `processed-data/`. Khi cần chỉnh noise cho giống camera thật hơn, dùng app:
+
+```powershell
+python .\scripts\noise_tuning_gui.py
+```
+
+Workflow khuyến nghị:
+
+- Chọn processed dataset, ví dụ `processed-data/pointnet2_semseg_k41144` hoặc `processed-data/pointnet2_semseg_bending_pipe`.
+- Load train config sẽ dùng để train. App tự đọc `dataset.root`, `dataset.normalize`, và block `dataset.augment`.
+- Điều chỉnh các tham số jitter, depth noise, point dropout, outlier, normal jitter, z-rotation, quantization, grazing/edge/blob dropout, camera fallback.
+- Xem tab VTK `3D Point Cloud` và phần stats: số point bị dịch, mean/p95/max displacement, semantic changed, object->background.
+- Dùng `side-by-side` để so clean/noisy tách nhau, hoặc `overlay` để đặt noisy cloud lên clean cloud cùng một góc nhìn. Tab `2D Projection` vẫn giữ lại để kiểm tra nhanh top/front/side.
+- Lưu `augment` preset YAML hoặc lưu ra một train config mới. Nút `Update Config` ghi đè block `augment` trong config đang load, nhưng comment YAML có thể bị mất.
+
+App dùng đúng implementation `src/data/augmentation.py` như training. Với `normalize: scene_center`, preview sẽ dùng cloud đã normalize và camera position trong cùng frame, sát với path của instance segmentation DataLoader.
+
+Nếu cần xem 3D bằng Open3D hoặc export PLY clean/noisy:
+
+```powershell
+python .\scripts\view_augmented_point_cloud.py .\processed-data\pointnet2_semseg_k41144\test\sample_000011.npz --config .\configs\train\pointnet2_semseg_k41144.yaml
+```
+
+### 5.5.1. Real-depth gap từ `real-data/scene_001.pcd` (2026-07-01)
+
+Real reference hiện có là `real-data/scene_001.pcd` của object gần
+`bending_pipe`. File này là point cloud PCD binary, 459708 points, tọa độ dạng
+mm-like (`z` khoảng `-725..-595`), nên khi đưa vào real-eval phải scale `0.001`
+sang mét. Thống kê nhanh sau khi scale: XY nearest-neighbor p50/p90/p99 khoảng
+`0.59 / 0.96 / 1.12 mm`; local depth gap giữa 8 hàng xóm XY p50/p90/p95/p99
+khoảng `0.85 / 28.27 / 56.89 / 96.55 mm`; khoảng `19.56%` điểm nằm gần depth
+discontinuity `> 5 mm`.
+
+Kết luận: synthetic clean-raycast chưa đủ giống real, nhất là biên object sát
+nhau và bề mặt dễ mất depth. Với K41144 Wave2, dùng config experiment:
+
+```powershell
+python .\scripts\train_pointnet2_instance_seg.py --config .\configs\train\pointnet2_instance_k41144_wave2_sim2real.yaml --out .\experiments\pointnet2_instance_k41144_wave2_sim2real
+```
+
+Luôn so model sim-to-real với clean checkpoint trên cùng synthetic gate và real
+set đã label. Không ghi noise trực tiếp vào `synthetic-data/`; raw clean vẫn là
+nguồn GT/mask/pose để audit.
+
+Generator và GUI hiện cũng có raw sensor-noise mode để tạo một wave riêng gần
+real hơn ngay từ bước export raw. Default vẫn là clean:
+
+```powershell
+python .\scripts\generate_synthetic_blender.py --settings-file .\configs\generator\k41144_grid.json --sensor-noise-profile structured_light --output .\synthetic-data\k41144_sensor_noise_smoke --samples 3
+```
+
+Các parameter chính: `sensor_noise_profile`, `depth_quantization_m`,
+`depth_quadratic_noise`, `depth_random_dropout_prob`, `edge_gap_m`,
+`edge_dropout_prob`, `edge_smear_prob`, `edge_smear_radius_px`,
+`flying_pixel_prob`, `flying_pixel_alpha_min/max`, `bridge_prob`,
+`bridge_max_gap_px`, `blob_dropout_count`, `blob_dropout_radius_px`. GUI có group
+`Depth Sensor Noise` để chỉnh/export/import các giá trị này. Khi profile khác
+`none`, `sensor_data.npz` lưu thêm `sensor_artifact_mask` và `metadata.json` lưu
+`sensor_noise_summary`.
 
 ## 6. Train Instance Segmentation
 

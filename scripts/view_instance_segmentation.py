@@ -1,7 +1,9 @@
 """PySide6 + VTK app to inspect instance segmentation AND 6D pose results.
 
 Load the model (a registry bundle, or a raw instance checkpoint for segmentation
-only), open a scene (an .npz with points/points_camera + optional features), then:
+only), open a scene (an .npz with points/points_camera + optional features, or a
+camera .pcd which is auto-converted to metres + the positive-forward frame with
+estimated normals), then:
 
 - "Run segmentation": cluster the scene into instances; view the cloud colored per
   instance, click an instance to isolate it, show centroids, and re-tune the
@@ -343,7 +345,7 @@ class BackendViewer(QMainWindow):
         self.model_combo.addItem("From checkpoint...")
         self.load_model_btn = QPushButton("Load model")
         self.load_model_btn.clicked.connect(self.on_load_model)
-        open_scene_btn = QPushButton("Open scene (.npz)...")
+        open_scene_btn = QPushButton("Open scene (.npz / .pcd)...")
         open_scene_btn.clicked.connect(self.on_open_scene)
         self.scene_label = QLabel("No scene")
         self.scene_label.setWordWrap(True)
@@ -492,19 +494,26 @@ class BackendViewer(QMainWindow):
         self.statusBar().showMessage(f"Model loaded: {model_id} (device={self.segmenter.device}; {pose_txt}).")
 
     def on_open_scene(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(self, "Open scene", str(PROJECT_ROOT), "NumPy (*.npz)")
+        path, _ = QFileDialog.getOpenFileName(self, "Open scene", str(PROJECT_ROOT), "Point clouds (*.npz *.pcd)")
         if path:
             self._set_scene_path(Path(path))
 
     def _set_scene_path(self, path: Path) -> None:
         try:
-            points, features = _load_scene_npz(path)
+            if path.suffix.lower() == ".pcd":
+                points, features, info = _load_scene_pcd(path)
+                note = (f"\n.pcd: {'mm→m' if info['in_mm'] else 'm'}, "
+                        f"{'flipped Z→+fwd' if info['flip_z'] else 'no Z flip'}, "
+                        f"estimated normals (away), {info['raw_points']}→{points.shape[0]} pts")
+            else:
+                points, features = _load_scene_npz(path)
+                note = ""
         except Exception as exc:  # noqa: BLE001
             self.statusBar().showMessage(f"Could not load scene: {exc}")
             return
         self.scene_points, self.scene_features, self.scene_name = points, features, path.name
         self.scene_label.setText(f"Scene: {path.name}\n{points.shape[0]} points, "
-                                 f"features={'yes' if features is not None else 'no'}")
+                                 f"features={'yes' if features is not None else 'no'}{note}")
         self.forward = None
         self._set_busy(False)
 
@@ -768,10 +777,52 @@ def _load_scene_npz(path: Path):
     return points, features
 
 
+def _load_scene_pcd(path: Path, target_points: int = 16384):
+    """Read a camera .pcd into the convention the pipeline expects.
+
+    Real depth-camera clouds differ from the synthetic processed scenes, so we:
+    metres (auto: large magnitudes -> millimetres /1000); positive-forward camera
+    frame (auto: a cloud whose points sit at negative z is looking down -z, so
+    negate z); per-point normals (use the file's, else estimate + orient toward
+    the camera, since the instance model needs xyz+normal); and a subsample to the
+    model's scene size. Returns (points, normals, info) with what was applied.
+    """
+    import open3d as o3d
+
+    pcd = o3d.io.read_point_cloud(str(path))
+    points = np.asarray(pcd.points, dtype=np.float64)
+    if points.shape[0] == 0:
+        raise ValueError("empty point cloud")
+    points = points[np.isfinite(points).all(axis=1)]
+
+    in_mm = float(np.median(np.linalg.norm(points, axis=1))) > 10.0
+    if in_mm:
+        points = points / 1000.0
+    flip_z = float(np.median(points[:, 2])) < 0.0  # camera looking down -z -> positive-forward
+    if flip_z:
+        points[:, 2] *= -1.0
+
+    # Estimate normals oriented AWAY from the camera: the synthetic `normal_camera`
+    # the instance model trained on point away from the sensor (+z), so matching
+    # that sign is what makes the model fire on a real cloud (verified empirically).
+    cloud = o3d.geometry.PointCloud()
+    cloud.points = o3d.utility.Vector3dVector(points)
+    cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30))
+    cloud.orient_normals_towards_camera_location(np.zeros(3))
+    normals = -np.asarray(cloud.normals, dtype=np.float64)
+
+    raw = int(points.shape[0])
+    if raw > target_points:
+        keep = np.random.default_rng(7).choice(raw, size=target_points, replace=False)
+        points, normals = points[keep], normals[keep]
+    info = {"raw_points": raw, "in_mm": in_mm, "flip_z": flip_z}
+    return points.astype(np.float32), normals.astype(np.float32), info
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Inspect instance segmentation + 6D pose (PySide6 + VTK)")
     parser.add_argument("--sku", default=None, help="Preselect this registry SKU.")
-    parser.add_argument("--scene", default=None, help="Preload this scene .npz.")
+    parser.add_argument("--scene", default=None, help="Preload this scene (.npz or .pcd).")
     parser.add_argument("--registry-root", default="models")
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args(argv)

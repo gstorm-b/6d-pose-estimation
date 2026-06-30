@@ -28,6 +28,14 @@ from mathutils import Euler, Matrix, Vector
 
 OBJECT_CLASS_ID = 1
 BACKGROUND_ID = 0
+ARTIFACT_RANDOM_DROPOUT = 1
+ARTIFACT_EDGE_DROPOUT = 2
+ARTIFACT_BLOB_DROPOUT = 4
+ARTIFACT_EDGE_SMEAR = 8
+ARTIFACT_FLYING_PIXEL = 16
+ARTIFACT_BRIDGE = 32
+ARTIFACT_RANGE_NOISE = 64
+ARTIFACT_QUANTIZATION = 128
 
 # Pending rigid bodies stay in the Bullet world as static colliders, so they are
 # parked outside the bin and teleported to the drop position this many frames
@@ -435,6 +443,26 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-sensor-width", type=float, default=32.0, help="Camera sensor width in mm for all cameras.")
     parser.add_argument("--camera-clip-start", type=float, default=0.01, help="Camera near clip distance in meters.")
     parser.add_argument("--camera-clip-end", type=float, default=1.50, help="Camera far clip distance in meters.")
+    parser.add_argument(
+        "--sensor-noise-profile",
+        choices=("none", "structured_light", "tof"),
+        default="none",
+        help="Apply a post-raycast depth sensor artifact profile to raw depth/mask/points.",
+    )
+    parser.add_argument("--depth-quantization-m", type=float, default=0.001, help="Quantize valid depth to this step in metres when sensor noise is enabled.")
+    parser.add_argument("--depth-quadratic-noise", type=float, default=0.004, help="Depth std coefficient: std = coef * depth^2, in metres.")
+    parser.add_argument("--depth-random-dropout-prob", type=float, default=0.03, help="Random valid-pixel depth dropout probability.")
+    parser.add_argument("--edge-gap-m", type=float, default=0.005, help="Local neighbor depth gap that marks a depth edge, in metres.")
+    parser.add_argument("--edge-dropout-prob", type=float, default=0.40, help="Drop valid pixels near depth discontinuities.")
+    parser.add_argument("--edge-smear-prob", type=float, default=0.25, help="Replace edge depth with a foreground/background mixture.")
+    parser.add_argument("--edge-smear-radius-px", type=int, default=1, help="Dilate edge zones by this many pixels before smear/dropout.")
+    parser.add_argument("--flying-pixel-prob", type=float, default=0.25, help="Create mixed-depth flying pixels near depth discontinuities.")
+    parser.add_argument("--flying-pixel-alpha-min", type=float, default=0.20, help="Minimum foreground/background mix alpha for flying pixels.")
+    parser.add_argument("--flying-pixel-alpha-max", type=float, default=0.80, help="Maximum foreground/background mix alpha for flying pixels.")
+    parser.add_argument("--bridge-prob", type=float, default=0.15, help="Fill some background pixels near object edges with object-like mixed depth.")
+    parser.add_argument("--bridge-max-gap-px", type=int, default=3, help="Search radius in pixels for bridge artifacts between adjacent objects.")
+    parser.add_argument("--blob-dropout-count", type=int, default=3, help="Number of circular sensor dropout blobs per frame.")
+    parser.add_argument("--blob-dropout-radius-px", type=int, default=8, help="Radius of each circular dropout blob in pixels.")
     parser.add_argument("--cycles-samples", type=int, default=48, help="Cycles render samples for rgb.png.")
     parser.add_argument("--view-transform", default="Filmic", help="Color management view transform, e.g. Filmic, Standard, AgX.")
     parser.add_argument("--view-look", default="Medium High Contrast", help="Color management look, e.g. None, Medium High Contrast.")
@@ -1798,6 +1826,324 @@ def raycast_sensor_data(
     }
 
 
+def _shift_2d(array: np.ndarray, dy: int, dx: int, fill: float | int) -> np.ndarray:
+    out = np.full(array.shape, fill, dtype=array.dtype)
+    h, w = array.shape[:2]
+    src_y0 = max(0, -dy)
+    src_y1 = min(h, h - dy)
+    src_x0 = max(0, -dx)
+    src_x1 = min(w, w - dx)
+    dst_y0 = max(0, dy)
+    dst_y1 = min(h, h + dy)
+    dst_x0 = max(0, dx)
+    dst_x1 = min(w, w + dx)
+    if src_y0 < src_y1 and src_x0 < src_x1:
+        out[dst_y0:dst_y1, dst_x0:dst_x1] = array[src_y0:src_y1, src_x0:src_x1]
+    return out
+
+
+def _dilate_bool(mask: np.ndarray, radius_px: int) -> np.ndarray:
+    radius = max(0, int(radius_px))
+    if radius <= 0:
+        return mask
+    out = mask.copy()
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy == 0 and dx == 0:
+                continue
+            out |= _shift_2d(mask, dy, dx, False)
+    return out
+
+
+def _depth_edge_context(
+    depth: np.ndarray,
+    instance_mask: np.ndarray,
+    normal_world: np.ndarray,
+    normal_camera: np.ndarray,
+) -> dict[str, np.ndarray]:
+    valid = depth > 0
+    min_depth = np.full(depth.shape, np.inf, dtype=np.float32)
+    max_depth = np.full(depth.shape, -np.inf, dtype=np.float32)
+    min_instance = np.zeros(depth.shape, dtype=np.uint16)
+    max_instance = np.zeros(depth.shape, dtype=np.uint16)
+    min_normal_world = np.zeros(normal_world.shape, dtype=np.float32)
+    max_normal_world = np.zeros(normal_world.shape, dtype=np.float32)
+    min_normal_camera = np.zeros(normal_camera.shape, dtype=np.float32)
+    max_normal_camera = np.zeros(normal_camera.shape, dtype=np.float32)
+
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            shifted_depth = depth if (dy == 0 and dx == 0) else _shift_2d(depth, dy, dx, 0.0)
+            shifted_instance = instance_mask if (dy == 0 and dx == 0) else _shift_2d(instance_mask, dy, dx, 0)
+            shifted_world = normal_world if (dy == 0 and dx == 0) else _shift_2d(normal_world, dy, dx, 0.0)
+            shifted_camera = normal_camera if (dy == 0 and dx == 0) else _shift_2d(normal_camera, dy, dx, 0.0)
+            shifted_valid = shifted_depth > 0
+            smaller = shifted_valid & (shifted_depth < min_depth)
+            larger = shifted_valid & (shifted_depth > max_depth)
+            min_depth[smaller] = shifted_depth[smaller]
+            max_depth[larger] = shifted_depth[larger]
+            min_instance[smaller] = shifted_instance[smaller]
+            max_instance[larger] = shifted_instance[larger]
+            min_normal_world[smaller] = shifted_world[smaller]
+            max_normal_world[larger] = shifted_world[larger]
+            min_normal_camera[smaller] = shifted_camera[smaller]
+            max_normal_camera[larger] = shifted_camera[larger]
+
+    depth_gap = np.where(valid & np.isfinite(min_depth) & np.isfinite(max_depth), max_depth - min_depth, 0.0)
+    return {
+        "depth_gap": depth_gap.astype(np.float32),
+        "min_depth": min_depth,
+        "max_depth": max_depth,
+        "min_instance": min_instance,
+        "max_instance": max_instance,
+        "min_normal_world": min_normal_world,
+        "max_normal_world": max_normal_world,
+        "min_normal_camera": min_normal_camera,
+        "max_normal_camera": max_normal_camera,
+    }
+
+
+def _copy_mixed_normals(
+    target: np.ndarray,
+    choose_min: np.ndarray,
+    normal_min: np.ndarray,
+    normal_max: np.ndarray,
+) -> np.ndarray:
+    out = target.copy()
+    out[choose_min] = normal_min[choose_min]
+    out[~choose_min] = normal_max[~choose_min]
+    return out
+
+
+def _apply_bridge_artifacts(
+    depth: np.ndarray,
+    instance_mask: np.ndarray,
+    normal_world: np.ndarray,
+    normal_camera: np.ndarray,
+    artifact_mask: np.ndarray,
+    rng: np.random.Generator,
+    *,
+    prob: float,
+    radius_px: int,
+    edge_gap_m: float,
+) -> None:
+    radius = max(0, int(radius_px))
+    if prob <= 0 or radius <= 0:
+        return
+    h, w = depth.shape
+    obj_depth_sum = np.zeros_like(depth, dtype=np.float32)
+    obj_depth_count = np.zeros_like(depth, dtype=np.uint16)
+    nearest_id = np.zeros_like(instance_mask, dtype=np.uint16)
+    nearest_depth = np.zeros_like(depth, dtype=np.float32)
+    nearest_world = np.zeros_like(normal_world, dtype=np.float32)
+    nearest_camera = np.zeros_like(normal_camera, dtype=np.float32)
+    best_dist2 = np.full(depth.shape, 10**9, dtype=np.int32)
+    object_pixels = (depth > 0) & (instance_mask > 0)
+
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dy == 0 and dx == 0:
+                continue
+            dist2 = dy * dy + dx * dx
+            if dist2 > radius * radius:
+                continue
+            shifted_object = _shift_2d(object_pixels, dy, dx, False)
+            shifted_depth = _shift_2d(depth, dy, dx, 0.0)
+            shifted_id = _shift_2d(instance_mask, dy, dx, 0)
+            shifted_world = _shift_2d(normal_world, dy, dx, 0.0)
+            shifted_camera = _shift_2d(normal_camera, dy, dx, 0.0)
+            obj_depth_sum[shifted_object] += shifted_depth[shifted_object]
+            obj_depth_count[shifted_object] += 1
+            better = shifted_object & (dist2 < best_dist2)
+            best_dist2[better] = dist2
+            nearest_id[better] = shifted_id[better]
+            nearest_depth[better] = shifted_depth[better]
+            nearest_world[better] = shifted_world[better]
+            nearest_camera[better] = shifted_camera[better]
+
+    mean_depth = np.divide(
+        obj_depth_sum,
+        np.maximum(obj_depth_count.astype(np.float32), 1.0),
+        out=np.zeros_like(obj_depth_sum),
+        where=obj_depth_count > 0,
+    )
+    background_near_object = (instance_mask == 0) & (obj_depth_count >= 2) & (nearest_id > 0)
+    if edge_gap_m > 0:
+        background_near_object &= np.abs(mean_depth - depth) > edge_gap_m
+    selected = background_near_object & (rng.random((h, w)) < prob)
+    if not np.any(selected):
+        return
+    alpha = rng.uniform(0.35, 0.75, size=(h, w)).astype(np.float32)
+    base_depth = np.where(depth > 0, depth, mean_depth)
+    depth[selected] = (alpha[selected] * nearest_depth[selected]) + ((1.0 - alpha[selected]) * base_depth[selected])
+    instance_mask[selected] = nearest_id[selected]
+    normal_world[selected] = nearest_world[selected]
+    normal_camera[selected] = nearest_camera[selected]
+    artifact_mask[selected] |= ARTIFACT_BRIDGE
+
+
+def _rebuild_sensor_points(
+    sensor: dict[str, Any],
+    camera: bpy.types.Object,
+) -> None:
+    depth = np.asarray(sensor["depth_m"], dtype=np.float32)
+    instance_mask = np.asarray(sensor["instance_mask"], dtype=np.uint16)
+    intr = sensor["intrinsics"]
+    fx, fy, cx, cy = float(intr["fx"]), float(intr["fy"]), float(intr["cx"]), float(intr["cy"])
+    v, u = np.nonzero((depth > 0) & (instance_mask > 0))
+    if v.size == 0:
+        sensor["points_camera"] = np.zeros((0, 3), dtype=np.float32)
+        sensor["points_world"] = np.zeros((0, 3), dtype=np.float32)
+        sensor["point_instance_ids"] = np.zeros((0,), dtype=np.uint16)
+        sensor["point_semantic_ids"] = np.zeros((0,), dtype=np.uint16)
+        sensor["point_pixels"] = np.zeros((0, 2), dtype=np.uint16)
+        return
+
+    z = depth[v, u]
+    x = ((u.astype(np.float32) - cx) / fx) * z
+    y = -((v.astype(np.float32) - cy) / fy) * z
+    points_camera = np.stack([x, y, z], axis=1).astype(np.float32)
+    points_camera_blender = np.stack([x, y, -z, np.ones_like(z)], axis=1).astype(np.float32)
+    camera_to_world = np.array(camera.matrix_world, dtype=np.float32)
+    points_world = (points_camera_blender @ camera_to_world.T)[:, :3].astype(np.float32)
+    point_instances = instance_mask[v, u].astype(np.uint16)
+
+    sensor["points_camera"] = points_camera
+    sensor["points_world"] = points_world
+    sensor["point_instance_ids"] = point_instances
+    sensor["point_semantic_ids"] = np.where(point_instances > 0, OBJECT_CLASS_ID, BACKGROUND_ID).astype(np.uint16)
+    sensor["point_pixels"] = np.stack([u, v], axis=1).astype(np.uint16)
+
+
+def apply_depth_sensor_artifacts(
+    sensor: dict[str, Any],
+    camera: bpy.types.Object,
+    args: argparse.Namespace,
+    *,
+    seed: int,
+) -> dict[str, Any]:
+    if args.sensor_noise_profile == "none":
+        return sensor
+
+    rng = np.random.default_rng(seed + 17_171)
+    noisy = dict(sensor)
+    depth = np.asarray(sensor["depth_m"], dtype=np.float32).copy()
+    instance_mask = np.asarray(sensor["instance_mask"], dtype=np.uint16).copy()
+    normal_world = np.asarray(sensor["normal_world"], dtype=np.float32).copy()
+    normal_camera = np.asarray(sensor["normal_camera"], dtype=np.float32).copy()
+    artifact_mask = np.zeros(depth.shape, dtype=np.uint16)
+    h, w = depth.shape
+
+    context = _depth_edge_context(depth, instance_mask, normal_world, normal_camera)
+    edge = context["depth_gap"] > float(args.edge_gap_m)
+    edge = _dilate_bool(edge, int(args.edge_smear_radius_px))
+
+    if args.edge_smear_prob > 0:
+        selected = edge & (depth > 0) & (rng.random((h, w)) < float(args.edge_smear_prob))
+        if np.any(selected):
+            alpha = rng.uniform(float(args.flying_pixel_alpha_min), float(args.flying_pixel_alpha_max), size=(h, w)).astype(np.float32)
+            depth[selected] = (
+                alpha[selected] * context["min_depth"][selected]
+                + (1.0 - alpha[selected]) * context["max_depth"][selected]
+            )
+            artifact_mask[selected] |= ARTIFACT_EDGE_SMEAR
+
+    if args.flying_pixel_prob > 0:
+        selected = edge & (depth > 0) & (rng.random((h, w)) < float(args.flying_pixel_prob))
+        if np.any(selected):
+            alpha_min = min(float(args.flying_pixel_alpha_min), float(args.flying_pixel_alpha_max))
+            alpha_max = max(float(args.flying_pixel_alpha_min), float(args.flying_pixel_alpha_max))
+            alpha = rng.uniform(alpha_min, alpha_max, size=(h, w)).astype(np.float32)
+            depth[selected] = (
+                alpha[selected] * context["min_depth"][selected]
+                + (1.0 - alpha[selected]) * context["max_depth"][selected]
+            )
+            choose_min = rng.random((h, w)) < 0.5
+            replace_id = np.where(choose_min, context["min_instance"], context["max_instance"]).astype(np.uint16)
+            replace = selected & (replace_id > 0)
+            instance_mask[replace] = replace_id[replace]
+            normal_world[replace] = _copy_mixed_normals(
+                normal_world, choose_min, context["min_normal_world"], context["max_normal_world"]
+            )[replace]
+            normal_camera[replace] = _copy_mixed_normals(
+                normal_camera, choose_min, context["min_normal_camera"], context["max_normal_camera"]
+            )[replace]
+            artifact_mask[selected] |= ARTIFACT_FLYING_PIXEL
+
+    _apply_bridge_artifacts(
+        depth,
+        instance_mask,
+        normal_world,
+        normal_camera,
+        artifact_mask,
+        rng,
+        prob=float(args.bridge_prob),
+        radius_px=int(args.bridge_max_gap_px),
+        edge_gap_m=float(args.edge_gap_m),
+    )
+
+    dropout = np.zeros(depth.shape, dtype=bool)
+    if args.depth_random_dropout_prob > 0:
+        selected = (depth > 0) & (rng.random((h, w)) < float(args.depth_random_dropout_prob))
+        dropout |= selected
+        artifact_mask[selected] |= ARTIFACT_RANDOM_DROPOUT
+    if args.edge_dropout_prob > 0:
+        selected = edge & (depth > 0) & (rng.random((h, w)) < float(args.edge_dropout_prob))
+        dropout |= selected
+        artifact_mask[selected] |= ARTIFACT_EDGE_DROPOUT
+    if int(args.blob_dropout_count) > 0 and int(args.blob_dropout_radius_px) > 0:
+        valid_y, valid_x = np.nonzero(depth > 0)
+        if valid_y.size > 0:
+            count = min(int(args.blob_dropout_count), int(valid_y.size))
+            centers = rng.choice(valid_y.size, size=count, replace=False)
+            yy, xx = np.ogrid[:h, :w]
+            radius2 = int(args.blob_dropout_radius_px) ** 2
+            for center in centers:
+                cy, cx = int(valid_y[center]), int(valid_x[center])
+                selected = ((yy - cy) ** 2 + (xx - cx) ** 2) <= radius2
+                dropout |= selected
+                artifact_mask[selected] |= ARTIFACT_BLOB_DROPOUT
+    if np.any(dropout):
+        depth[dropout] = 0.0
+        instance_mask[dropout] = 0
+        normal_world[dropout] = 0.0
+        normal_camera[dropout] = 0.0
+
+    valid = depth > 0
+    if args.depth_quadratic_noise > 0 and np.any(valid):
+        std = float(args.depth_quadratic_noise) * (depth[valid] ** 2)
+        depth[valid] += rng.normal(0.0, std).astype(np.float32)
+        depth[depth < 0] = 0.0
+        artifact_mask[valid] |= ARTIFACT_RANGE_NOISE
+    valid = depth > 0
+    if args.depth_quantization_m > 0 and np.any(valid):
+        step = float(args.depth_quantization_m)
+        depth[valid] = np.round(depth[valid] / step) * step
+        artifact_mask[valid] |= ARTIFACT_QUANTIZATION
+    invalid_after_noise = depth <= 0
+    if np.any(invalid_after_noise):
+        instance_mask[invalid_after_noise] = 0
+        normal_world[invalid_after_noise] = 0.0
+        normal_camera[invalid_after_noise] = 0.0
+
+    noisy["depth_m"] = depth.astype(np.float32)
+    noisy["instance_mask"] = instance_mask
+    noisy["normal_world"] = normal_world.astype(np.float32)
+    noisy["normal_camera"] = normal_camera.astype(np.float32)
+    noisy["sensor_artifact_mask"] = artifact_mask
+    noisy["sensor_noise_summary"] = {
+        "profile": args.sensor_noise_profile,
+        "artifact_pixels": int(np.count_nonzero(artifact_mask)),
+        "artifact_pixel_fraction": float(np.count_nonzero(artifact_mask)) / float(max(1, artifact_mask.size)),
+        "valid_pixels_before": int(np.count_nonzero(np.asarray(sensor["depth_m"]) > 0)),
+        "valid_pixels_after": int(np.count_nonzero(depth > 0)),
+        "object_pixels_before": int(np.count_nonzero(np.asarray(sensor["instance_mask"]) > 0)),
+        "object_pixels_after": int(np.count_nonzero(instance_mask > 0)),
+    }
+    _rebuild_sensor_points(noisy, camera)
+    return noisy
+
+
 def render_rgb(path: Path, camera: bpy.types.Object) -> None:
     bpy.context.scene.camera = camera
     bpy.context.scene.render.filepath = str(path)
@@ -1967,6 +2313,7 @@ def write_sample_outputs(
         point_instance_ids=sensor["point_instance_ids"],
         point_semantic_ids=sensor["point_semantic_ids"],
         point_pixels=sensor["point_pixels"],
+        sensor_artifact_mask=sensor.get("sensor_artifact_mask", np.zeros((height, width), dtype=np.uint16)),
     )
 
     depth = sensor["depth_m"]
@@ -2016,6 +2363,7 @@ def write_sample_outputs(
         "debug_camera_to_world": matrix_to_list(debug_camera.matrix_world),
         "debug_world_to_camera": matrix_to_list(debug_camera.matrix_world.inverted()),
         "settings": settings,
+        "sensor_noise_summary": sensor.get("sensor_noise_summary", {"profile": "none"}),
         "object_count": len(objects),
         "visible_object_point_count": int(np.asarray(sensor["point_instance_ids"]).shape[0]),
         "instances": [],
@@ -2343,7 +2691,10 @@ def build_sample(
                     hide_objects(out_of_bin_objects)
                     visible_objects = [obj for obj in objects if obj not in out_of_bin_objects]
                 sensor = raycast_sensor_data(scene_context.depth_camera, visible_objects, args.width, args.height)
+                sensor = apply_depth_sensor_artifacts(sensor, scene_context.depth_camera, args, seed=seed)
                 stats.update(sample_visibility_stats(sensor))
+                if "sensor_noise_summary" in sensor:
+                    stats["sensor_noise"] = sensor["sensor_noise_summary"]
                 target_visible_objects = min(args.objects, args.min_visible_objects)
                 if int(stats["visible_objects"]) < target_visible_objects or int(stats["visible_points"]) < args.min_visible_points:
                     reject_reason = "visibility"
@@ -2418,6 +2769,21 @@ def build_sample(
             "camera_sensor_width": args.camera_sensor_width,
             "camera_clip_start": args.camera_clip_start,
             "camera_clip_end": args.camera_clip_end,
+            "sensor_noise_profile": args.sensor_noise_profile,
+            "depth_quantization_m": args.depth_quantization_m,
+            "depth_quadratic_noise": args.depth_quadratic_noise,
+            "depth_random_dropout_prob": args.depth_random_dropout_prob,
+            "edge_gap_m": args.edge_gap_m,
+            "edge_dropout_prob": args.edge_dropout_prob,
+            "edge_smear_prob": args.edge_smear_prob,
+            "edge_smear_radius_px": args.edge_smear_radius_px,
+            "flying_pixel_prob": args.flying_pixel_prob,
+            "flying_pixel_alpha_min": args.flying_pixel_alpha_min,
+            "flying_pixel_alpha_max": args.flying_pixel_alpha_max,
+            "bridge_prob": args.bridge_prob,
+            "bridge_max_gap_px": args.bridge_max_gap_px,
+            "blob_dropout_count": args.blob_dropout_count,
+            "blob_dropout_radius_px": args.blob_dropout_radius_px,
             "cycles_samples": args.cycles_samples,
             "view_transform": args.view_transform,
             "view_look": args.view_look,
@@ -2588,6 +2954,21 @@ def main() -> None:
         "camera_sensor_width": args.camera_sensor_width,
         "camera_clip_start": args.camera_clip_start,
         "camera_clip_end": args.camera_clip_end,
+        "sensor_noise_profile": args.sensor_noise_profile,
+        "depth_quantization_m": args.depth_quantization_m,
+        "depth_quadratic_noise": args.depth_quadratic_noise,
+        "depth_random_dropout_prob": args.depth_random_dropout_prob,
+        "edge_gap_m": args.edge_gap_m,
+        "edge_dropout_prob": args.edge_dropout_prob,
+        "edge_smear_prob": args.edge_smear_prob,
+        "edge_smear_radius_px": args.edge_smear_radius_px,
+        "flying_pixel_prob": args.flying_pixel_prob,
+        "flying_pixel_alpha_min": args.flying_pixel_alpha_min,
+        "flying_pixel_alpha_max": args.flying_pixel_alpha_max,
+        "bridge_prob": args.bridge_prob,
+        "bridge_max_gap_px": args.bridge_max_gap_px,
+        "blob_dropout_count": args.blob_dropout_count,
+        "blob_dropout_radius_px": args.blob_dropout_radius_px,
         "cycles_samples": args.cycles_samples,
         "view_transform": args.view_transform,
         "view_look": args.view_look,

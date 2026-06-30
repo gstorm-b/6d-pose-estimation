@@ -660,3 +660,63 @@ Kết luận:
     - Nhiễu ánh sáng sẽ làm mất đi những cụm point cloud tại khu vực nhiễu.
     - Khu vực viền giữa hai object thường không có sự khác biệt rõ ràng, mà khoảng cách space giữa các điểm point cloud ở đây sẽ khá sát nhau.
 Bạn có giải pháp nào để tạo dataset sát với thực tế hoặc giải pháp nào trong quá trình train có thể giải quyết vấn đề này không.
+
+### Cập nhật 2026-07-01 - real-depth gap từ `real-data/scene_001.pcd`
+
+File real tham chiếu hiện có là `real-data/scene_001.pcd` (không thấy folder tên
+`real scene`). Đây là point cloud binary PCD với fields `x y z rgb`, 459708
+points, `HEIGHT 1`. Tọa độ có scale dạng mm: bbox khoảng
+`x=-126..169`, `y=-161..211`, `z=-725..-595`; khi đưa vào real-eval phải scale
+`0.001` sang mét.
+
+Thống kê sau khi scale sang mét:
+
+- extent scene: khoảng `0.296 x 0.372 x 0.130 m`.
+- nearest-neighbor XY trên sample 80k: p50/p90/p99 khoảng `0.59 / 0.96 / 1.12 mm`.
+- local depth gap giữa 8 hàng xóm XY: p50/p90/p95/p99 khoảng
+  `0.85 / 28.27 / 56.89 / 96.55 mm`.
+- khoảng `19.56%` điểm có local depth gap `> 5 mm`, `17.80%` điểm `> 10 mm`.
+
+Nhận định senior-engineer:
+
+- Synthetic raycast hiện quá sạch ở biên object và bề mặt specular/đen. Gaussian
+  jitter nhẹ không đủ mô phỏng việc camera thật mất depth, fatten edge, hoặc làm
+  các object sát nhau dính thành một cụm.
+- Không nên ghi noise trực tiếp vào raw `synthetic-data/`; raw vẫn cần clean để
+  giữ GT/mask/pose có thể audit. Noise nên nằm trong train-time augmentation hoặc
+  một processed experiment riêng có manifest rõ ràng.
+- Repo đã có augmentation đúng hướng trong `src/data/augmentation.py`:
+  range-squared depth noise, depth quantization, grazing dropout, edge dropout,
+  blob/specular dropout. Cần bật nó cho K41144 Wave2 và đo clean regression trước
+  khi promote model.
+
+Thay đổi đã thêm:
+
+- `configs/train/pointnet2_instance_k41144_wave2_sim2real.yaml`: config instance
+  segmentation K41144 Wave2 bật structured-light sim-to-real noise, root trỏ
+  `processed-data/pointnet2_semseg_k41144_wave2`, batch size 4.
+- `scripts/generate_synthetic_blender.py`: thêm post-raycast sensor artifact
+  simulation cho raw generation. Profile `none` giữ behavior cũ; profile
+  `structured_light` / `tof` bật depth quantization, range noise, random/edge/blob
+  dropout, edge smear, flying pixels, và bridge artifact. Output `sensor_data.npz`
+  có thêm `sensor_artifact_mask`; `metadata.json` có `sensor_noise_summary`.
+- `scripts/dataset_gui.py`: thêm group `Depth Sensor Noise` để chỉnh/export/import
+  toàn bộ tham số generator sensor-noise từ GUI.
+
+Backlog đề xuất để data giống real hơn:
+
+1. Train lại K41144 Wave2 với config sim-to-real mới, so với clean checkpoint trên
+   cùng synthetic test gate và trên real set đã label. Không promote nếu clean
+   ADD_0.1d/instance recall tụt quá ngưỡng.
+2. Convert `real-data/scene_001.pcd` thành real-eval frame chuẩn nếu có intrinsics
+   hoặc export thêm depth frame gốc từ camera. PCD hiện không đủ để sinh mask 2D
+   hoặc chạy full depth pipeline như `depth.npy + intrinsics.json`.
+3. Calibrate noise bằng real frames: match invalid/dropout fraction, depth edge
+   gap distribution, quantization, và blob hole size thay vì dùng guess cố định.
+4. Mở rộng generator scene composition: ưu tiên dense piles/touching objects,
+   nhiều object liền kề, occlusion cao, fill level giống bin thật; giảm các scene
+   quá "đẹp" hoặc quá tách biệt.
+5. Calibrate `edge_smear_prob`, `flying_pixel_prob`, `bridge_prob`,
+   `edge_dropout_prob`, `blob_dropout_count`, và `depth_quadratic_noise` theo
+   real frames thay vì dùng default. Mục tiêu là match distribution của
+   `sensor_artifact_mask`, object-point retention, và local depth-gap với real PCD.

@@ -569,6 +569,23 @@ class DatasetGui(QMainWindow):
         self.camera_sensor_width_spin = self._double_spin(1.0, 200.0, 32.0, 2, 1.0)
         self.camera_clip_start_spin = self._double_spin(0.001, 10.0, 0.01, 3, 0.001)
         self.camera_clip_end_spin = self._double_spin(0.1, 100.0, 1.5, 2, 0.1)
+        self.sensor_noise_profile_combo = QComboBox()
+        self.sensor_noise_profile_combo.addItems(["none", "structured_light", "tof"])
+        self.sensor_noise_profile_combo.setToolTip("Post-raycast depth sensor artifacts. Leave none for clean auditable raw data.")
+        self.depth_quantization_spin = self._double_spin(0.0, 0.05, 0.001, 4, 0.0005)
+        self.depth_quadratic_noise_spin = self._double_spin(0.0, 0.1, 0.004, 4, 0.001)
+        self.depth_random_dropout_prob_spin = self._double_spin(0.0, 1.0, 0.03, 3, 0.01)
+        self.edge_gap_spin = self._double_spin(0.0, 0.2, 0.005, 4, 0.001)
+        self.edge_dropout_prob_spin = self._double_spin(0.0, 1.0, 0.40, 3, 0.05)
+        self.edge_smear_prob_spin = self._double_spin(0.0, 1.0, 0.25, 3, 0.05)
+        self.edge_smear_radius_px_spin = self._spin(0, 32, 1)
+        self.flying_pixel_prob_spin = self._double_spin(0.0, 1.0, 0.25, 3, 0.05)
+        self.flying_pixel_alpha_min_spin = self._double_spin(0.0, 1.0, 0.20, 3, 0.05)
+        self.flying_pixel_alpha_max_spin = self._double_spin(0.0, 1.0, 0.80, 3, 0.05)
+        self.bridge_prob_spin = self._double_spin(0.0, 1.0, 0.15, 3, 0.05)
+        self.bridge_max_gap_px_spin = self._spin(0, 64, 3)
+        self.blob_dropout_count_spin = self._spin(0, 100, 3)
+        self.blob_dropout_radius_px_spin = self._spin(0, 256, 8)
         self.cycles_samples_spin = self._spin(1, 8192, 48)
         self.view_exposure_spin = self._double_spin(-10.0, 10.0, -1.2, 2, 0.1)
         self.view_gamma_spin = self._double_spin(0.0, 5.0, 1.0, 2, 0.1)
@@ -637,6 +654,23 @@ class DatasetGui(QMainWindow):
         cam_form.addRow("Sensor width (mm)", self.camera_sensor_width_spin)
         cam_form.addRow("Clip start", self.camera_clip_start_spin)
         cam_form.addRow("Clip end", self.camera_clip_end_spin)
+
+        sensor_form = add_form_group("Depth Sensor Noise")
+        sensor_form.addRow("Profile", self.sensor_noise_profile_combo)
+        sensor_form.addRow("Quantization (m)", self.depth_quantization_spin)
+        sensor_form.addRow("Range noise coef", self.depth_quadratic_noise_spin)
+        sensor_form.addRow("Random dropout", self.depth_random_dropout_prob_spin)
+        sensor_form.addRow("Edge gap (m)", self.edge_gap_spin)
+        sensor_form.addRow("Edge dropout", self.edge_dropout_prob_spin)
+        sensor_form.addRow("Edge smear", self.edge_smear_prob_spin)
+        sensor_form.addRow("Edge radius px", self.edge_smear_radius_px_spin)
+        sensor_form.addRow("Flying pixels", self.flying_pixel_prob_spin)
+        sensor_form.addRow("Flying alpha min", self.flying_pixel_alpha_min_spin)
+        sensor_form.addRow("Flying alpha max", self.flying_pixel_alpha_max_spin)
+        sensor_form.addRow("Bridge prob", self.bridge_prob_spin)
+        sensor_form.addRow("Bridge gap px", self.bridge_max_gap_px_spin)
+        sensor_form.addRow("Blob count", self.blob_dropout_count_spin)
+        sensor_form.addRow("Blob radius px", self.blob_dropout_radius_px_spin)
 
         light_form = add_form_group("Lighting & Render")
         light_form.addRow("Light XYZ", self.light_location_row)
@@ -1041,6 +1075,21 @@ class DatasetGui(QMainWindow):
             "camera_sensor_width": self.camera_sensor_width_spin.value(),
             "camera_clip_start": self.camera_clip_start_spin.value(),
             "camera_clip_end": self.camera_clip_end_spin.value(),
+            "sensor_noise_profile": self.sensor_noise_profile_combo.currentText(),
+            "depth_quantization_m": self.depth_quantization_spin.value(),
+            "depth_quadratic_noise": self.depth_quadratic_noise_spin.value(),
+            "depth_random_dropout_prob": self.depth_random_dropout_prob_spin.value(),
+            "edge_gap_m": self.edge_gap_spin.value(),
+            "edge_dropout_prob": self.edge_dropout_prob_spin.value(),
+            "edge_smear_prob": self.edge_smear_prob_spin.value(),
+            "edge_smear_radius_px": self.edge_smear_radius_px_spin.value(),
+            "flying_pixel_prob": self.flying_pixel_prob_spin.value(),
+            "flying_pixel_alpha_min": self.flying_pixel_alpha_min_spin.value(),
+            "flying_pixel_alpha_max": self.flying_pixel_alpha_max_spin.value(),
+            "bridge_prob": self.bridge_prob_spin.value(),
+            "bridge_max_gap_px": self.bridge_max_gap_px_spin.value(),
+            "blob_dropout_count": self.blob_dropout_count_spin.value(),
+            "blob_dropout_radius_px": self.blob_dropout_radius_px_spin.value(),
             "cycles_samples": self.cycles_samples_spin.value(),
             "view_transform": self.view_transform_combo.currentText(),
             "view_look": self.view_look_combo.currentText(),
@@ -1086,6 +1135,10 @@ class DatasetGui(QMainWindow):
             "cycles_samples": self.cycles_samples_spin,
             "simulation_video_frame_step": self.video_frame_step_spin,
             "simulation_video_fps": self.video_fps_spin,
+            "edge_smear_radius_px": self.edge_smear_radius_px_spin,
+            "bridge_max_gap_px": self.bridge_max_gap_px_spin,
+            "blob_dropout_count": self.blob_dropout_count_spin,
+            "blob_dropout_radius_px": self.blob_dropout_radius_px_spin,
         }
         double_spins = {
             "model_scale": self.model_scale_spin,
@@ -1126,6 +1179,16 @@ class DatasetGui(QMainWindow):
             "object_angular_damping": self.object_angular_damping_spin,
             "object_metallic": self.object_metallic_spin,
             "object_roughness": self.object_roughness_spin,
+            "depth_quantization_m": self.depth_quantization_spin,
+            "depth_quadratic_noise": self.depth_quadratic_noise_spin,
+            "depth_random_dropout_prob": self.depth_random_dropout_prob_spin,
+            "edge_gap_m": self.edge_gap_spin,
+            "edge_dropout_prob": self.edge_dropout_prob_spin,
+            "edge_smear_prob": self.edge_smear_prob_spin,
+            "flying_pixel_prob": self.flying_pixel_prob_spin,
+            "flying_pixel_alpha_min": self.flying_pixel_alpha_min_spin,
+            "flying_pixel_alpha_max": self.flying_pixel_alpha_max_spin,
+            "bridge_prob": self.bridge_prob_spin,
         }
         xyz_spins = {
             "depth_camera_location": self.depth_camera_location_spins,
@@ -1164,6 +1227,8 @@ class DatasetGui(QMainWindow):
             self.view_look_combo.setCurrentText(str(settings["view_look"]))
         if "light_type" in settings:
             self.light_type_combo.setCurrentText(str(settings["light_type"]))
+        if "sensor_noise_profile" in settings:
+            self.sensor_noise_profile_combo.setCurrentText(str(settings["sensor_noise_profile"]))
         if "allow_out_of_bin_filtering" in settings:
             self.allow_out_of_bin_filtering_check.setChecked(bool(settings["allow_out_of_bin_filtering"]))
         if "record_simulation_video" in settings:
@@ -1505,6 +1570,14 @@ class DatasetGui(QMainWindow):
         self.log_text.append(f"[gui] Out-of-bin policy: {policy}")
         if single_sample_video:
             self.log_text.append("[gui] Single-sample video mode: forcing --samples 1, --record-simulation-video, and video frame step 1.")
+        if self.sensor_noise_profile_combo.currentText() != "none":
+            self.log_text.append(
+                "[gui] Depth sensor noise enabled: "
+                f"profile={self.sensor_noise_profile_combo.currentText()}, "
+                f"edge_dropout={self.edge_dropout_prob_spin.value():.3f}, "
+                f"flying={self.flying_pixel_prob_spin.value():.3f}, "
+                f"bridge={self.bridge_prob_spin.value():.3f}."
+            )
         self.log_text.append(
             "[gui] Simulation estimate: "
             f"{self.estimated_simulation_frames()} frames per attempt, "
