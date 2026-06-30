@@ -22,7 +22,7 @@ from src.data.pointnet2_processing import (  # noqa: E402
     summarize_converted_samples,
     write_schema,
 )
-from src.data.raw_dataset import discover_samples  # noqa: E402
+from src.data.raw_dataset import REQUIRED_PREVIEW_FILES, discover_samples  # noqa: E402
 from src.data.validation import validate_dataset  # noqa: E402
 
 
@@ -39,6 +39,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test-ratio", type=float, help="Test split ratio.")
     parser.add_argument("--seed", type=int, help="Random seed for splits and sampling.")
     parser.add_argument("--skip-raw-validation", action="store_true", help="Skip raw dataset validation gate.")
+    parser.add_argument(
+        "--skip-invalid-samples",
+        action="store_true",
+        help="Skip raw sample folders missing required files when merging trusted multi-root datasets.",
+    )
     return parser.parse_args()
 
 
@@ -152,6 +157,10 @@ def ensure_output_root(path: Path) -> None:
         (path / split).mkdir(exist_ok=True)
 
 
+def missing_required_files(sample: Any) -> list[str]:
+    return [name for name in REQUIRED_PREVIEW_FILES if not (sample.path / name).exists()]
+
+
 def main() -> int:
     args = parse_args()
     raw_roots = [Path(r) for r in args.raw]
@@ -161,6 +170,7 @@ def main() -> int:
     from src.data.raw_dataset import RawSample
 
     samples: list[RawSample] = []
+    skipped_samples: list[dict[str, Any]] = []
     for raw_root in raw_roots:
         if not args.skip_raw_validation:
             report = validate_dataset(raw_root, project_root=PROJECT_ROOT)
@@ -177,10 +187,25 @@ def main() -> int:
         # Prefix names with the root so merged samples stay unique.
         prefix = raw_root.name if len(raw_roots) > 1 else ""
         for sample in root_samples:
+            missing = missing_required_files(sample)
+            if missing and args.skip_invalid_samples:
+                skipped_samples.append(
+                    {
+                        "raw_root": str(raw_root),
+                        "sample": sample.name,
+                        "reason": "missing_required_files",
+                        "missing_files": missing,
+                    }
+                )
+                continue
             unique_name = f"{prefix}__{sample.name}" if prefix else sample.name
             samples.append(RawSample(unique_name, sample.path))
+    if not samples:
+        raise RuntimeError("No valid raw samples found after filtering")
     raw_root = raw_roots[0]
     print(f"[pointnet2] merged {len(samples)} samples from {len(raw_roots)} root(s)")
+    if skipped_samples:
+        print(f"[pointnet2] skipped {len(skipped_samples)} invalid sample(s)")
 
     ensure_output_root(out_root)
     splits = split_samples(samples, config)
@@ -214,6 +239,7 @@ def main() -> int:
             "test_ratio": config.test_ratio,
             "seed": config.seed,
         },
+        "skipped_samples": skipped_samples,
     }
     (out_root / "conversion_config.json").write_text(json.dumps(conversion_config, indent=2), encoding="utf-8")
     stats = summarize_converted_samples(all_stats, split_names)

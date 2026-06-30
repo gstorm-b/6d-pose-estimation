@@ -1001,9 +1001,131 @@ Possible converter:
 scripts/export_yolo_segmentation.py
 ```
 
+## 2026-06-30 K41144 Wave 2 Status
+
+New K41144 raw roots were processed:
+
+```text
+synthetic-data/k41144_1 ... synthetic-data/k41144_8
+```
+
+Validation summary:
+
+```text
+k41144_1: 200/200 OK
+k41144_2: 200 SPARSE samples, not corrupt; 10 visible objects, no out-of-bin
+k41144_3: 200/200 OK
+k41144_4: 200/200 OK
+k41144_5: 107/107 OK
+k41144_6: 200/200 OK
+k41144_7: 200/200 OK
+k41144_8: 87/88 OK; sample_000087 missing required raw files
+```
+
+`scripts/prepare_pointnet2_semseg_dataset.py` now has an opt-in `--skip-invalid-samples`
+flag for trusted multi-root merges. It preserves strict default behavior but skipped
+`synthetic-data/k41144_8/sample_000087` for this run and recorded the skip in
+`conversion_config.json`.
+
+Processed dataset:
+
+```text
+processed-data/pointnet2_semseg_k41144_wave2
+samples: 1394
+train/val/test: 1115/139/140
+visible_instances min/median/max: 3/10/50
+```
+
+Instance checkpoint and test metrics:
+
+```text
+checkpoint: experiments/pointnet2_instance_k41144_wave2_20260630_231537/checkpoints/best.pt
+training: 3 epochs, batch_size=4, device=cuda
+test object_iou: 0.9932
+test instance_precision: 0.8676
+test instance_recall: 0.8054
+test instance_mean_iou: 0.8600
+```
+
+Pose crop exports:
+
+```text
+GT train: experiments/wave2_pose_crops_k41144_gt_train, 18579 crops
+GT val:   experiments/wave2_pose_crops_k41144_gt_val, 2251 crops
+GT test:  experiments/wave2_pose_crops_k41144_gt_test, 2495 crops
+Pred test: experiments/wave2_pose_crops_k41144_pred_test, 2181 crops
+Pred matched_gt_iou mean: 0.7182
+Pred matched_gt_iou >= 0.5: 1774/2181
+```
+
+Pose checkpoint and metrics:
+
+```text
+checkpoint: experiments/pointnet2_pose_k41144_20260630_233852/checkpoints/best_add.pt
+source: 1-epoch fine-tune from experiments/pointnet2_pose_k41144_20260608_023605/checkpoints/best_add.pt
+
+GT test old checkpoint:       ADD 4.406 mm, translation 4.434 mm, ADD_0.1d 0.973
+GT test fine-tuned checkpoint ADD 3.099 mm, translation 3.199 mm, ADD_0.1d 0.961
+
+Pred test IoU>=0.5: ADD 6.096 mm, translation 5.730 mm, ADD_0.1d 0.849
+Pred test all:      ADD 10.817 mm, translation 11.280 mm, ADD_0.1d 0.732
+```
+
+Interpretation:
+
+- The fine-tuned pose checkpoint improves GT-crop ADD and translation but slightly lowers GT ADD_0.1d versus the old checkpoint.
+- Full predicted-crop performance is limited by crop quality; dense 50-object scenes remain difficult for the 3-epoch instance checkpoint.
+- Do not promote K41144 v2 yet. Treat this as a provisional training/evaluation run.
+
+Backlog:
+
+1. Run longer K41144 Wave 2 instance training/sign-off and tune DBSCAN/min-cluster settings.
+2. Run longer pose fine-tune and compare best ADD vs best ADD_0.1d selection.
+3. Run optional hybrid refinement on Wave 2 GT and predicted cases, reported separately.
+4. Run Phase 21 predicted-crop sweep on `pointnet2_semseg_k41144_wave2`.
+5. Package K41144 bundle v2 only after full-pipeline metrics improve stably.
+
 ## Recommended Next Todo
 
 1. Visually inspect validation/test/inference PLY previews.
 2. Record visible failure cases, if any.
-3. After semantic segmentation sign-off, start the instance segmentation or PPRNet++-style pose regression branch.
-4. Begin designing pose-estimation labels derived from `object_to_camera` and instance labels.
+3. For K41144 Wave 2, complete the backlog above before promoting a v2 bundle.
+4. When using real camera data, run the real-eval harness and revisit sim-to-real augmentation.
+
+## 2026-07-01 Real-Depth Gap Note
+
+User-provided real reference currently found as `real-data/scene_001.pcd`
+(`real scene` folder was not present). It is a binary PCD with 459708 points and
+mm-like coordinates; scale by `0.001` before feeding real-eval code that expects
+metres. Quick stats after scaling:
+
+```text
+scene extent: 0.296 x 0.372 x 0.130 m
+xy NN distance p50/p90/p99: 0.59 / 0.96 / 1.12 mm
+local 8-neighbor z-gap p50/p90/p95/p99: 0.85 / 28.27 / 56.89 / 96.55 mm
+edge-like points with z-gap > 5 mm: 19.56%
+edge-like points with z-gap > 10 mm: 17.80%
+```
+
+Decision:
+
+- Keep raw `synthetic-data/` clean and auditable.
+- Train a separate K41144 Wave2 sim-to-real experiment with structured-light
+  noise instead of promoting clean synthetic directly.
+- Added config:
+  `configs/train/pointnet2_instance_k41144_wave2_sim2real.yaml`.
+- Added raw generator/GUI support for opt-in sensor artifacts:
+  `sensor_noise_profile=none|structured_light|tof` plus quantization, range
+  noise, random/edge/blob dropout, edge smear, flying pixels, and bridge
+  artifacts. The generator writes `sensor_artifact_mask` and
+  `sensor_noise_summary` when enabled.
+
+Backlog:
+
+1. Train/evaluate K41144 Wave2 sim-to-real config against the clean Wave2 model.
+2. Convert real capture into the documented `depth.npy + intrinsics.json` format,
+   or capture that format directly; a lone PCD is useful for stats but not full
+   2D depth pipeline validation.
+3. Calibrate both generator sensor-noise parameters and train-time augmentation
+   against real frames, especially edge dropout, blob dropout, quantization,
+   edge smear, flying pixels, and bridge artifacts for adjacent objects.
