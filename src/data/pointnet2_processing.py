@@ -40,6 +40,13 @@ class PointNet2ConversionConfig:
     normals_source: str = "render"
     normal_radius_m: float = 0.02
     normal_max_nn: int = 30
+    # Simulated-sensor label consistency: when the raw sample carries a
+    # `depth_gt_m` (Route A stereo/SGM samples), points whose measured depth
+    # disagrees with the true surface by more than this are flying pixels -
+    # they sit at a wrong 3D location, so their 2D-mask label is meaningless.
+    # Relabel them background, which is also what a geometric pseudo-labeler
+    # does with flying pixels on real captures. 0 disables.
+    flying_pixel_tolerance_m: float = 0.008
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "PointNet2ConversionConfig":
@@ -110,6 +117,7 @@ def convert_raw_sample(
         depth_m = np.asarray(data["depth_m"], dtype=np.float32)
         instance_mask = np.asarray(data["instance_mask"], dtype=np.uint16)
         normal_camera = np.asarray(data["normal_camera"], dtype=np.float32) if config.use_normals else None
+        depth_gt_m = np.asarray(data["depth_gt_m"], dtype=np.float32) if "depth_gt_m" in data.files else None
 
     points, pixels = unproject_depth_to_camera(depth_m, metadata["camera_intrinsics"])
     if points.shape[0] == 0:
@@ -118,6 +126,14 @@ def convert_raw_sample(
     point_u = pixels[:, 0].astype(np.int64)
     point_v = pixels[:, 1].astype(np.int64)
     instance_labels_full = instance_mask[point_v, point_u].astype(np.int64)
+    flying_pixel_count = 0
+    if depth_gt_m is not None and config.flying_pixel_tolerance_m > 0:
+        gt_at_pixel = depth_gt_m[point_v, point_u]
+        flying = (gt_at_pixel <= 0) | (
+            np.abs(depth_m[point_v, point_u] - gt_at_pixel) > config.flying_pixel_tolerance_m
+        )
+        instance_labels_full[flying] = 0
+        flying_pixel_count = int(flying.sum())
     semantic_labels_full = (instance_labels_full > 0).astype(np.int64)
     features_full = None
     if config.use_normals:
@@ -171,6 +187,7 @@ def convert_raw_sample(
         "used_normals": bool(config.use_normals),
         "sampling_mode": config.sampling_mode,
         "normals_source": config.normals_source,
+        "flying_pixels_relabeled": flying_pixel_count,
     }
     return ConvertedSample(arrays=arrays, stats=stats)
 

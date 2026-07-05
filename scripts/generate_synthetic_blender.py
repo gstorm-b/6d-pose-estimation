@@ -318,6 +318,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Fraction of the pattern texture covered by dots.")
     parser.add_argument("--stereo-spot-size-deg", type=float, default=65.0,
                         help="Projector cone angle in degrees (should cover the camera FOV).")
+    parser.add_argument("--ground-plane", action=argparse.BooleanOptionalAction, default=None,
+                        help="Add a table surface under the bin (default: on when --stereo).")
+    parser.add_argument("--ground-plane-size", type=float, default=1.6)
+    parser.add_argument("--ground-plane-color", type=float, nargs=3, default=(0.28, 0.28, 0.29))
+    parser.add_argument("--ground-plane-roughness", type=float, default=0.6)
     parser.add_argument("--rgb-camera-location", type=float, nargs=3, default=(0.0, -0.05, 0.42))
     parser.add_argument("--rgb-camera-target", type=float, nargs=3, default=(0.0, 0.0, 0.025))
     parser.add_argument("--rgb-camera-lens", type=float, default=35.0)
@@ -708,6 +713,27 @@ def create_bin(
         add_box("bin_wall_neg_x", (-bin_x / 2.0 - wall_t / 2.0, 0.0, wall_h / 2.0), (wall_t, bin_y, wall_h), mat, collision_margin, friction, restitution),
     ]
     return parts
+
+
+def create_ground_plane(size: float, color_rgb: tuple[float, float, float], roughness: float) -> bpy.types.Object:
+    """A table surface under/around the bin.
+
+    Real captures always have geometry outside the bin (table, rig frame); a
+    scene that ends at the bin walls leaves the stereo matcher free to
+    hallucinate garbage correspondences on the empty world background. The
+    plane sits flush under the bin floor, is labeled background by the raycast
+    (it is not in the objects list), and needs no rigid body - the walls keep
+    parts from ever reaching it.
+    """
+
+    mat = make_material("mat_ground_table", (color_rgb[0], color_rgb[1], color_rgb[2], 1.0), roughness=roughness)
+    bpy.ops.mesh.primitive_cube_add(location=(0.0, 0.0, -0.012 - 0.002))
+    ground = bpy.context.object
+    ground.name = "ground_table"
+    ground.scale = (size / 2.0, size / 2.0, 0.002)
+    bpy.ops.object.transform_apply(scale=True)
+    ground.data.materials.append(mat)
+    return ground
 
 
 def random_rotation() -> tuple[float, float, float]:
@@ -2645,6 +2671,9 @@ def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> Genera
         args.bin_friction,
         args.bin_restitution,
     )
+    ground_enabled = args.ground_plane if args.ground_plane is not None else bool(getattr(args, "stereo", False))
+    if ground_enabled:
+        create_ground_plane(args.ground_plane_size, tuple(args.ground_plane_color), args.ground_plane_roughness)
     template = import_stl(model_path, args.class_name, args.model_scale)
     render = render_settings_from_args(args)
     depth_camera = setup_camera(
