@@ -78,6 +78,8 @@ class InstanceSegmenter:
         clustering: VotedCenterClusteringConfig,
         num_classes: int = 2,
         scene_num_points: int = 16384,
+        scene_subsample: str = "random",
+        scene_voxel_size_m: float = 0.002,
         device: str = "cuda",
         seed: int = 7,
     ) -> None:
@@ -85,6 +87,10 @@ class InstanceSegmenter:
         self.clustering = clustering
         self.num_classes = int(num_classes)
         self.scene_num_points = int(scene_num_points)
+        if scene_subsample not in ("random", "voxel"):
+            raise ValueError(f"unknown scene_subsample: {scene_subsample}")
+        self.scene_subsample = scene_subsample
+        self.scene_voxel_size_m = float(scene_voxel_size_m)
         self.device = device
         self.seed = int(seed)
 
@@ -105,6 +111,8 @@ class InstanceSegmenter:
             clustering=clustering,
             num_classes=num_classes,
             scene_num_points=int(inference.get("num_points", 16384)),
+            scene_subsample=str(inference.get("scene_subsample", "random")),
+            scene_voxel_size_m=float(inference.get("scene_voxel_size_m", 0.002)),
             device=loaded.device,
             seed=seed,
         )
@@ -134,12 +142,15 @@ class InstanceSegmenter:
         model = build_pointnet2_instance_seg_from_config(config)
         model.load_state_dict(checkpoint["model_state"])
         model.to(resolved_device).eval()
-        clustering_config = VotedCenterClusteringConfig.from_mapping(clustering or config.get("inference"))
+        inference_config = config.get("inference") or {}
+        clustering_config = VotedCenterClusteringConfig.from_mapping(clustering or inference_config)
         return cls(
             instance_model=model,
             clustering=clustering_config,
             num_classes=int(config.get("model", {}).get("num_classes", 2)),
             scene_num_points=scene_num_points,
+            scene_subsample=str(inference_config.get("scene_subsample", "random")),
+            scene_voxel_size_m=float(inference_config.get("scene_voxel_size_m", 0.002)),
             device=resolved_device,
             seed=seed,
         )
@@ -148,7 +159,14 @@ class InstanceSegmenter:
         if points.shape[0] <= self.scene_num_points:
             return points, features, pixels
         rng = np.random.default_rng(self.seed)
-        keep = rng.choice(points.shape[0], size=self.scene_num_points, replace=False)
+        if self.scene_subsample == "voxel":
+            from src.data.pointnet2_processing import voxel_sample_indices
+
+            keep = voxel_sample_indices(
+                points, num_points=self.scene_num_points, voxel_size_m=self.scene_voxel_size_m, rng=rng
+            )
+        else:
+            keep = rng.choice(points.shape[0], size=self.scene_num_points, replace=False)
         return (
             points[keep],
             None if features is None else features[keep],

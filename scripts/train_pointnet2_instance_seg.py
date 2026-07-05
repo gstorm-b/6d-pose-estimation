@@ -40,6 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--offset-weight", type=float, help="Override centroid-offset loss weight.")
     parser.add_argument("--embedding-weight", type=float, help="Override discriminative embedding loss weight.")
     parser.add_argument("--centroid-distance-weighting", action="store_true", help="Enable center-distance-sensitive offset loss weighting.")
+    parser.add_argument("--init-checkpoint", help="Initialize model weights from this checkpoint (fine-tuning).")
     return parser.parse_args()
 
 
@@ -254,6 +255,13 @@ def main() -> int:
 
     train_loader, val_loader, train_dataset, dataset_root = build_loaders(config, args)
     model = build_pointnet2_instance_seg_from_config(config).to(device)
+    if args.init_checkpoint:
+        from src.training.checkpoint import load_checkpoint
+
+        init_state = load_checkpoint(Path(args.init_checkpoint), map_location="cpu")
+        model.load_state_dict(init_state["model_state"])
+        config.setdefault("runtime", {})["init_checkpoint"] = str(args.init_checkpoint)
+        print(f"[train] initialized weights from {args.init_checkpoint}")
     config.setdefault("model", {})["ops_backend_effective"] = getattr(model, "ops_backend_name", "unknown")
     num_classes = int(config.get("model", {}).get("num_classes", 2))
     if train_config.get("class_weight_mode", "auto") == "auto":

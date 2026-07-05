@@ -34,6 +34,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-points", type=int, help="Fixed point count per processed sample.")
     parser.add_argument("--use-normals", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--object-fraction-target", type=float, help="Target fraction of sampled object points.")
+    parser.add_argument("--sampling-mode", choices=("balanced", "natural", "voxel"),
+                        help="Point sampling: balanced (legacy 65%% object), natural (uniform), voxel (density-normalized).")
+    parser.add_argument("--voxel-size-m", type=float, help="Voxel size for --sampling-mode voxel.")
+    parser.add_argument("--normals-source", choices=("render", "estimated"),
+                        help="Normal features: renderer-perfect or estimated from depth like the real path.")
     parser.add_argument("--train-ratio", type=float, help="Train split ratio.")
     parser.add_argument("--val-ratio", type=float, help="Validation split ratio.")
     parser.add_argument("--test-ratio", type=float, help="Test split ratio.")
@@ -123,6 +128,9 @@ def build_conversion_config(args: argparse.Namespace) -> tuple[PointNet2Conversi
         "num_points": args.num_points,
         "use_normals": args.use_normals,
         "object_fraction_target": args.object_fraction_target,
+        "sampling_mode": args.sampling_mode,
+        "voxel_size_m": args.voxel_size_m,
+        "normals_source": args.normals_source,
         "train_ratio": args.train_ratio,
         "val_ratio": args.val_ratio,
         "test_ratio": args.test_ratio,
@@ -137,14 +145,13 @@ def build_conversion_config(args: argparse.Namespace) -> tuple[PointNet2Conversi
     if total_ratio <= 0:
         raise ValueError("train_ratio + val_ratio + test_ratio must be positive")
     if abs(total_ratio - 1.0) > 1e-6:
-        config = PointNet2ConversionConfig(
-            num_points=config.num_points,
-            use_normals=config.use_normals,
-            object_fraction_target=config.object_fraction_target,
+        from dataclasses import replace
+
+        config = replace(
+            config,
             train_ratio=config.train_ratio / total_ratio,
             val_ratio=config.val_ratio / total_ratio,
             test_ratio=config.test_ratio / total_ratio,
-            seed=config.seed,
         )
     return config, file_config
 
@@ -234,6 +241,9 @@ def main() -> int:
             "num_points": config.num_points,
             "use_normals": config.use_normals,
             "object_fraction_target": config.object_fraction_target,
+            "sampling_mode": config.sampling_mode,
+            "voxel_size_m": config.voxel_size_m,
+            "normals_source": config.normals_source,
             "train_ratio": config.train_ratio,
             "val_ratio": config.val_ratio,
             "test_ratio": config.test_ratio,

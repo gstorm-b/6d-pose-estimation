@@ -780,43 +780,20 @@ def _load_scene_npz(path: Path):
 def _load_scene_pcd(path: Path, target_points: int = 16384):
     """Read a camera .pcd into the convention the pipeline expects.
 
-    Real depth-camera clouds differ from the synthetic processed scenes, so we:
-    metres (auto: large magnitudes -> millimetres /1000); positive-forward camera
-    frame (auto: a cloud whose points sit at negative z is looking down -z, so
-    negate z); per-point normals (use the file's, else estimate + orient toward
-    the camera, since the instance model needs xyz+normal); and a subsample to the
+    Conversion (mm->m, flip-z, camera-oriented estimated normals) lives in
+    `src.data.pcd_loading`; this wrapper only adds the viewer's subsample to the
     model's scene size. Returns (points, normals, info) with what was applied.
     """
-    import open3d as o3d
+    from src.data.pcd_loading import load_scene_pcd
 
-    pcd = o3d.io.read_point_cloud(str(path))
-    points = np.asarray(pcd.points, dtype=np.float64)
-    if points.shape[0] == 0:
-        raise ValueError("empty point cloud")
-    points = points[np.isfinite(points).all(axis=1)]
-
-    in_mm = float(np.median(np.linalg.norm(points, axis=1))) > 10.0
-    if in_mm:
-        points = points / 1000.0
-    flip_z = float(np.median(points[:, 2])) < 0.0  # camera looking down -z -> positive-forward
-    if flip_z:
-        points[:, 2] *= -1.0
-
-    # Estimate normals oriented AWAY from the camera: the synthetic `normal_camera`
-    # the instance model trained on point away from the sensor (+z), so matching
-    # that sign is what makes the model fire on a real cloud (verified empirically).
-    cloud = o3d.geometry.PointCloud()
-    cloud.points = o3d.utility.Vector3dVector(points)
-    cloud.estimate_normals(o3d.geometry.KDTreeSearchParamHybrid(radius=0.02, max_nn=30))
-    cloud.orient_normals_towards_camera_location(np.zeros(3))
-    normals = -np.asarray(cloud.normals, dtype=np.float64)
-
-    raw = int(points.shape[0])
+    scene = load_scene_pcd(path)
+    points, normals = scene.points, scene.normals
+    raw = int(scene.info["valid_points"])
     if raw > target_points:
         keep = np.random.default_rng(7).choice(raw, size=target_points, replace=False)
         points, normals = points[keep], normals[keep]
-    info = {"raw_points": raw, "in_mm": in_mm, "flip_z": flip_z}
-    return points.astype(np.float32), normals.astype(np.float32), info
+    info = {"raw_points": raw, "in_mm": scene.info["in_mm"], "flip_z": scene.info["flip_z"]}
+    return points, normals, info
 
 
 def main(argv: list[str] | None = None) -> int:

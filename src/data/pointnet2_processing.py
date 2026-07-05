@@ -21,6 +21,25 @@ class PointNet2ConversionConfig:
     val_ratio: float = 0.1
     test_ratio: float = 0.1
     seed: int = 7
+    # How the fixed-size cloud is drawn from the full unprojected depth.
+    #   balanced: legacy - force `object_fraction_target` object points (oversamples
+    #             objects with replacement). Trains a strong "most points are object"
+    #             prior + a density signature that real clouds do not have.
+    #   natural:  uniform without replacement - the class mix and density the model
+    #             will actually see at inference.
+    #   voxel:    voxel-downsample to `voxel_size_m` first, then uniform fill/trim.
+    #             Matching the inference-side voxel subsample makes train and real
+    #             clouds share one density profile regardless of camera resolution.
+    sampling_mode: str = "balanced"
+    voxel_size_m: float = 0.002
+    # Where per-point normal features come from.
+    #   render:    the renderer's perfect `normal_camera` (legacy).
+    #   estimated: estimate from the unprojected depth exactly like the real-data
+    #              path does (open3d hybrid KDTree, oriented to the camera, negated)
+    #              so the normal channel sees one distribution in both domains.
+    normals_source: str = "render"
+    normal_radius_m: float = 0.02
+    normal_max_nn: int = 30
 
     @classmethod
     def from_mapping(cls, value: dict[str, Any] | None) -> "PointNet2ConversionConfig":
@@ -29,6 +48,12 @@ class PointNet2ConversionConfig:
         known = cls.__dataclass_fields__.keys()  # type: ignore[attr-defined]
         kwargs = {key: value[key] for key in known if key in value}
         return cls(**kwargs)
+
+    def __post_init__(self) -> None:
+        if self.sampling_mode not in ("balanced", "natural", "voxel"):
+            raise ValueError(f"unknown sampling_mode: {self.sampling_mode}")
+        if self.normals_source not in ("render", "estimated"):
+            raise ValueError(f"unknown normals_source: {self.normals_source}")
 
 
 @dataclass(frozen=True)
@@ -95,15 +120,29 @@ def convert_raw_sample(
     instance_labels_full = instance_mask[point_v, point_u].astype(np.int64)
     semantic_labels_full = (instance_labels_full > 0).astype(np.int64)
     features_full = None
-    if normal_camera is not None:
-        features_full = normal_camera[point_v, point_u].astype(np.float32)
+    if config.use_normals:
+        if config.normals_source == "estimated":
+            from .pcd_loading import estimate_camera_normals
 
-    indices = balanced_sample_indices(
-        semantic_labels_full,
-        num_points=config.num_points,
-        object_fraction_target=config.object_fraction_target,
-        rng=rng,
-    )
+            features_full = estimate_camera_normals(
+                points, radius=config.normal_radius_m, max_nn=config.normal_max_nn
+            )
+        elif normal_camera is not None:
+            features_full = normal_camera[point_v, point_u].astype(np.float32)
+
+    if config.sampling_mode == "balanced":
+        indices = balanced_sample_indices(
+            semantic_labels_full,
+            num_points=config.num_points,
+            object_fraction_target=config.object_fraction_target,
+            rng=rng,
+        )
+    elif config.sampling_mode == "natural":
+        indices = natural_sample_indices(points.shape[0], num_points=config.num_points, rng=rng)
+    else:
+        indices = voxel_sample_indices(
+            points, num_points=config.num_points, voxel_size_m=config.voxel_size_m, rng=rng
+        )
 
     sampled_points = points[indices].astype(np.float32)
     sampled_pixels = pixels[indices].astype(np.uint16)
@@ -130,8 +169,55 @@ def convert_raw_sample(
         "sampled_background_points": int(np.count_nonzero(sampled_semantic == 0)),
         "visible_instances": int(len(set(int(v) for v in np.unique(sampled_instance) if int(v) != 0))),
         "used_normals": bool(config.use_normals),
+        "sampling_mode": config.sampling_mode,
+        "normals_source": config.normals_source,
     }
     return ConvertedSample(arrays=arrays, stats=stats)
+
+
+def natural_sample_indices(total: int, num_points: int, rng: np.random.Generator) -> np.ndarray:
+    """Uniform sample without replacement (with replacement only when short)."""
+
+    if total == 0:
+        raise ValueError("cannot sample from an empty point set")
+    replace = total < num_points
+    chosen = rng.choice(total, size=num_points, replace=replace).astype(np.int64)
+    rng.shuffle(chosen)
+    return chosen
+
+
+def voxel_sample_indices(
+    points: np.ndarray,
+    num_points: int,
+    voxel_size_m: float,
+    rng: np.random.Generator,
+) -> np.ndarray:
+    """One point per occupied voxel, then uniform trim/fill to `num_points`.
+
+    Voxelizing first pins the cloud's density to `voxel_size_m` regardless of
+    the source camera resolution, which is the property that transfers between
+    synthetic renders and real sensors.
+    """
+
+    if points.shape[0] == 0:
+        raise ValueError("cannot sample from an empty point set")
+    keys = np.floor(np.asarray(points, dtype=np.float64) / float(voxel_size_m)).astype(np.int64)
+    order = rng.permutation(points.shape[0])
+    _uniq, first = np.unique(keys[order], axis=0, return_index=True)
+    voxel_indices = order[first]
+    if voxel_indices.shape[0] >= num_points:
+        chosen = rng.choice(voxel_indices, size=num_points, replace=False)
+    else:
+        remaining = np.setdiff1d(np.arange(points.shape[0]), voxel_indices, assume_unique=False)
+        short = num_points - voxel_indices.shape[0]
+        if remaining.size >= short:
+            fill = rng.choice(remaining, size=short, replace=False)
+        else:
+            fill = rng.choice(points.shape[0], size=short, replace=True)
+        chosen = np.concatenate([voxel_indices, fill])
+    chosen = chosen.astype(np.int64)
+    rng.shuffle(chosen)
+    return chosen
 
 
 def balanced_sample_indices(
@@ -213,7 +299,10 @@ Each split folder contains `.npz` files converted from raw Blender samples.
 
 - `num_points`: {config.num_points}
 - `use_normals`: {str(config.use_normals).lower()}
-- `object_fraction_target`: {config.object_fraction_target}
+- `sampling_mode`: {config.sampling_mode}
+- `object_fraction_target`: {config.object_fraction_target} (balanced mode only)
+- `voxel_size_m`: {config.voxel_size_m} (voxel mode only)
+- `normals_source`: {config.normals_source}
 
 Raw samples are reconstructed from `depth_m` and labeled with `instance_mask`; they do not use the raw object-only `points_camera` arrays as the full training scene.
 """
