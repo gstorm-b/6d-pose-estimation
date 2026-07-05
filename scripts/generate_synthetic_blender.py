@@ -56,6 +56,8 @@ class GenerationScene:
     rgb_camera: bpy.types.Object
     debug_camera: bpy.types.Object
     class_name: str
+    stereo_right_camera: bpy.types.Object | None = None
+    stereo_projector: bpy.types.Object | None = None
 
 
 @dataclass
@@ -300,6 +302,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--depth-camera-location", type=float, nargs=3, default=(0.0, -0.05, 0.42))
     parser.add_argument("--depth-camera-target", type=float, nargs=3, default=(0.0, 0.0, 0.025))
     parser.add_argument("--depth-camera-lens", type=float, default=35.0)
+    # Active-stereo simulation (Route A): render a rectified L/R pair from the
+    # depth camera plus a random-dot projector, so a real SGM/SGBM matcher can
+    # produce the depth (scripts/stereo_depth_postprocess.py) with the same
+    # artifact physics as the Basler stereo camera. GT stays raycast-perfect.
+    parser.add_argument("--stereo", action=argparse.BooleanOptionalAction, default=False,
+                        help="Render a stereo pair + dot projector for SGM depth simulation.")
+    parser.add_argument("--stereo-baseline", type=float, default=0.0998,
+                        help="Stereo baseline in metres (Basler STA-100: 0.0998).")
+    parser.add_argument("--stereo-samples", type=int, default=24,
+                        help="Cycles samples for the L/R renders (denoise off; noise is wanted).")
+    parser.add_argument("--stereo-projector-strength", type=float, default=40.0,
+                        help="Dot projector spotlight power in watts.")
+    parser.add_argument("--stereo-projector-dot-density", type=float, default=0.04,
+                        help="Fraction of the pattern texture covered by dots.")
+    parser.add_argument("--stereo-spot-size-deg", type=float, default=65.0,
+                        help="Projector cone angle in degrees (should cover the camera FOV).")
     parser.add_argument("--rgb-camera-location", type=float, nargs=3, default=(0.0, -0.05, 0.42))
     parser.add_argument("--rgb-camera-target", type=float, nargs=3, default=(0.0, 0.0, 0.025))
     parser.add_argument("--rgb-camera-lens", type=float, default=35.0)
@@ -1500,6 +1518,157 @@ def setup_lighting(
     bpy.context.scene.world.color = (world_color[0], world_color[1], world_color[2])
 
 
+def build_dot_pattern_image(name: str, size: int, density: float, seed: int) -> bpy.types.Image:
+    """A random-dot projector pattern as an in-memory Blender image."""
+
+    rng = np.random.default_rng(seed)
+    canvas = np.zeros((size, size), dtype=np.float32)
+    dot_count = max(1, int(size * size * density / 4.0))  # ~2x2 px per dot
+    ys = rng.integers(0, size - 1, size=dot_count)
+    xs = rng.integers(0, size - 1, size=dot_count)
+    for dy in (0, 1):
+        for dx in (0, 1):
+            canvas[np.clip(ys + dy, 0, size - 1), np.clip(xs + dx, 0, size - 1)] = 1.0
+
+    image = bpy.data.images.new(name, width=size, height=size, alpha=False, float_buffer=True)
+    rgba = np.empty((size * size, 4), dtype=np.float32)
+    rgba[:, 0] = rgba[:, 1] = rgba[:, 2] = canvas.reshape(-1)
+    rgba[:, 3] = 1.0
+    image.pixels.foreach_set(rgba.reshape(-1))
+    image.pack()
+    return image
+
+
+def setup_stereo_rig(left_camera: bpy.types.Object, args: argparse.Namespace) -> tuple[bpy.types.Object, bpy.types.Object]:
+    """Rectified right camera + random-dot projector for active-stereo simulation.
+
+    The right camera shares the left camera's rotation and optics and is offset
+    by the baseline along the camera's local +x (image right), which matches the
+    OpenCV left/right SGBM convention (positive disparities). The projector sits
+    between the two cameras like the Basler's pattern module and is kept
+    `hide_render=True` except while the stereo pair is rendered.
+    """
+
+    from mathutils import Matrix
+
+    bpy.ops.object.camera_add()
+    right = bpy.context.object
+    right.name = "stereo_right_camera"
+    right.data = left_camera.data.copy()
+    right.matrix_world = left_camera.matrix_world @ Matrix.Translation((float(args.stereo_baseline), 0.0, 0.0))
+
+    bpy.ops.object.light_add(type="SPOT")
+    projector = bpy.context.object
+    projector.name = "stereo_dot_projector"
+    projector.matrix_world = left_camera.matrix_world @ Matrix.Translation((float(args.stereo_baseline) / 2.0, 0.0, 0.0))
+    spot = projector.data
+    spot.energy = float(args.stereo_projector_strength)
+    spot.spot_size = math.radians(float(args.stereo_spot_size_deg))
+    spot.spot_blend = 0.15
+    spot.shadow_soft_size = 0.002  # near-point source: sharp dots + hard occlusion shadows
+
+    pattern = build_dot_pattern_image(
+        "stereo_dot_pattern", 1024, float(args.stereo_projector_dot_density), seed=20260705
+    )
+    spot.use_nodes = True
+    tree = spot.node_tree
+    emission = next(node for node in tree.nodes if node.type == "EMISSION")
+    texcoord = tree.nodes.new("ShaderNodeTexCoord")
+    transform = tree.nodes.new("ShaderNodeVectorTransform")
+    transform.vector_type = "VECTOR"
+    transform.convert_from = "WORLD"
+    transform.convert_to = "OBJECT"
+    separate = tree.nodes.new("ShaderNodeSeparateXYZ")
+    # Perspective divide: u = x / -z, v = y / -z (light emits along local -z).
+    div_u = tree.nodes.new("ShaderNodeMath")
+    div_u.operation = "DIVIDE"
+    div_v = tree.nodes.new("ShaderNodeMath")
+    div_v.operation = "DIVIDE"
+    neg_z = tree.nodes.new("ShaderNodeMath")
+    neg_z.operation = "MULTIPLY"
+    neg_z.inputs[1].default_value = -1.0
+    scale = 0.5 / math.tan(math.radians(float(args.stereo_spot_size_deg)) / 2.0)
+    map_u = tree.nodes.new("ShaderNodeMath")
+    map_u.operation = "MULTIPLY_ADD"
+    map_u.inputs[1].default_value = scale
+    map_u.inputs[2].default_value = 0.5
+    map_v = tree.nodes.new("ShaderNodeMath")
+    map_v.operation = "MULTIPLY_ADD"
+    map_v.inputs[1].default_value = scale
+    map_v.inputs[2].default_value = 0.5
+    combine = tree.nodes.new("ShaderNodeCombineXYZ")
+    tex = tree.nodes.new("ShaderNodeTexImage")
+    tex.image = pattern
+    tex.extension = "REPEAT"
+    tex.interpolation = "Closest"
+
+    links = tree.links
+    links.new(texcoord.outputs["Normal"], transform.inputs["Vector"])
+    links.new(transform.outputs["Vector"], separate.inputs["Vector"])
+    links.new(separate.outputs["Z"], neg_z.inputs[0])
+    links.new(separate.outputs["X"], div_u.inputs[0])
+    links.new(neg_z.outputs["Value"], div_u.inputs[1])
+    links.new(separate.outputs["Y"], div_v.inputs[0])
+    links.new(neg_z.outputs["Value"], div_v.inputs[1])
+    links.new(div_u.outputs["Value"], map_u.inputs[0])
+    links.new(div_v.outputs["Value"], map_v.inputs[0])
+    links.new(map_u.outputs["Value"], combine.inputs["X"])
+    links.new(map_v.outputs["Value"], combine.inputs["Y"])
+    links.new(combine.outputs["Vector"], tex.inputs["Vector"])
+    links.new(tex.outputs["Color"], emission.inputs["Color"])
+
+    projector.hide_render = True
+    return right, projector
+
+
+def render_stereo_pair(
+    sample_dir: Path,
+    left_camera: bpy.types.Object,
+    right_camera: bpy.types.Object,
+    projector: bpy.types.Object,
+    args: argparse.Namespace,
+) -> None:
+    """Render the L/R grayscale pair with the projector on and denoising off.
+
+    Render noise is deliberately kept (low sample count, no denoiser): it plays
+    the role of sensor noise and is what makes SGM produce realistic ripple.
+    """
+
+    scene = bpy.context.scene
+    saved = {
+        "samples": scene.cycles.samples,
+        "denoise": scene.cycles.use_denoising,
+        "color_mode": scene.render.image_settings.color_mode,
+        "color_depth": scene.render.image_settings.color_depth,
+        "view_transform": scene.view_settings.view_transform,
+        "look": scene.view_settings.look,
+        "camera": scene.camera,
+        "filepath": scene.render.filepath,
+    }
+    try:
+        scene.cycles.samples = max(1, int(args.stereo_samples))
+        scene.cycles.use_denoising = False
+        scene.render.image_settings.color_mode = "BW"
+        scene.render.image_settings.color_depth = "8"
+        scene.view_settings.view_transform = "Standard"
+        scene.view_settings.look = "None"
+        projector.hide_render = False
+        for camera, filename in ((left_camera, "stereo_left.png"), (right_camera, "stereo_right.png")):
+            scene.camera = camera
+            scene.render.filepath = str(sample_dir / filename)
+            bpy.ops.render.render(write_still=True)
+    finally:
+        projector.hide_render = True
+        scene.cycles.samples = saved["samples"]
+        scene.cycles.use_denoising = saved["denoise"]
+        scene.render.image_settings.color_mode = saved["color_mode"]
+        scene.render.image_settings.color_depth = saved["color_depth"]
+        scene.view_settings.view_transform = saved["view_transform"]
+        scene.view_settings.look = saved["look"]
+        scene.camera = saved["camera"]
+        scene.render.filepath = saved["filepath"]
+
+
 def configure_physics(
     frame_end: int = 260,
     substeps_per_frame: int = 60,
@@ -2296,9 +2465,16 @@ def write_sample_outputs(
     settings: dict[str, Any],
     sensor: dict[str, np.ndarray | dict[str, float]] | None = None,
     simulation_video_file: str | None = None,
+    stereo_right_camera: bpy.types.Object | None = None,
+    stereo_projector: bpy.types.Object | None = None,
+    stereo_args: argparse.Namespace | None = None,
 ) -> None:
     sample_dir.mkdir(parents=True, exist_ok=True)
     render_rgb(sample_dir / "rgb.png", rgb_camera)
+    stereo_rendered = False
+    if stereo_right_camera is not None and stereo_projector is not None and stereo_args is not None:
+        render_stereo_pair(sample_dir, depth_camera, stereo_right_camera, stereo_projector, stereo_args)
+        stereo_rendered = True
 
     if sensor is None:
         sensor = raycast_sensor_data(depth_camera, objects, width, height)
@@ -2367,6 +2543,15 @@ def write_sample_outputs(
         "object_count": len(objects),
         "visible_object_point_count": int(np.asarray(sensor["point_instance_ids"]).shape[0]),
         "instances": [],
+        "stereo": None if not stereo_rendered else {
+            "baseline_m": float(stereo_args.stereo_baseline),
+            "left_image": "stereo_left.png",
+            "right_image": "stereo_right.png",
+            "samples": int(stereo_args.stereo_samples),
+            "projector_strength": float(stereo_args.stereo_projector_strength),
+            "projector_dot_density": float(stereo_args.stereo_projector_dot_density),
+            "spot_size_deg": float(stereo_args.stereo_spot_size_deg),
+        },
         "files": {
             "rgb": "rgb.png",
             "sensor_data": "sensor_data.npz",
@@ -2491,12 +2676,18 @@ def setup_generation_scene(args: argparse.Namespace, model_path: Path) -> Genera
     )
     bpy.context.scene.camera = rgb_camera
     setup_lighting(tuple(args.light_location), args.light_energy, args.light_size, args.light_type, tuple(args.world_color))
+    stereo_right_camera = None
+    stereo_projector = None
+    if getattr(args, "stereo", False):
+        stereo_right_camera, stereo_projector = setup_stereo_rig(depth_camera, args)
     return GenerationScene(
         template=template,
         depth_camera=depth_camera,
         rgb_camera=rgb_camera,
         debug_camera=debug_camera,
         class_name=args.class_name,
+        stereo_right_camera=stereo_right_camera,
+        stereo_projector=stereo_projector,
     )
 
 
@@ -2792,6 +2983,12 @@ def build_sample(
             "depth_camera_location": list(args.depth_camera_location),
             "depth_camera_target": list(args.depth_camera_target),
             "depth_camera_lens": args.depth_camera_lens,
+            "stereo": bool(getattr(args, "stereo", False)),
+            "stereo_baseline": args.stereo_baseline,
+            "stereo_samples": args.stereo_samples,
+            "stereo_projector_strength": args.stereo_projector_strength,
+            "stereo_projector_dot_density": args.stereo_projector_dot_density,
+            "stereo_spot_size_deg": args.stereo_spot_size_deg,
             "rgb_camera_location": list(args.rgb_camera_location),
             "rgb_camera_target": list(args.rgb_camera_target),
             "rgb_camera_lens": args.rgb_camera_lens,
@@ -2834,6 +3031,9 @@ def build_sample(
             settings,
             sensor=sensor,
             simulation_video_file=simulation_video_file,
+            stereo_right_camera=scene_context.stereo_right_camera,
+            stereo_projector=scene_context.stereo_projector,
+            stereo_args=args if getattr(args, "stereo", False) else None,
         )
         if args.record_simulation_video and simulation_video_file:
             render_simulation_video(
@@ -2977,6 +3177,12 @@ def main() -> None:
         "depth_camera_location": list(args.depth_camera_location),
         "depth_camera_target": list(args.depth_camera_target),
         "depth_camera_lens": args.depth_camera_lens,
+            "stereo": bool(getattr(args, "stereo", False)),
+            "stereo_baseline": args.stereo_baseline,
+            "stereo_samples": args.stereo_samples,
+            "stereo_projector_strength": args.stereo_projector_strength,
+            "stereo_projector_dot_density": args.stereo_projector_dot_density,
+            "stereo_spot_size_deg": args.stereo_spot_size_deg,
         "rgb_camera_location": list(args.rgb_camera_location),
         "rgb_camera_target": list(args.rgb_camera_target),
         "rgb_camera_lens": args.rgb_camera_lens,

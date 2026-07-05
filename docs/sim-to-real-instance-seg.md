@@ -169,3 +169,36 @@ The learned voting path stays the goal for dense piles; next iteration needs
 generator, (b) more real captures pseudo-labeled with the classical stage
 (sparse scenes are self-labeling), and (c) possibly a higher offset-loss weight
 on real samples so the vote head adapts, not just the semantic head.
+
+## Route A: active-stereo simulation (wave 4)
+
+Instead of adding statistical noise to perfect raycast depth, wave 4 renders
+what the Basler actually sees and lets a real matcher produce the depth:
+
+- Measured camera model (from the real captures; `import-pcd` intrinsics fit +
+  disparity images): fx = fy = 1465.6 px @ 1224x1024, cx/cy at image center,
+  **baseline 99.8 mm** (disparity streams in 1/16-px fixed point), standoff
+  0.48-0.80 m, active random-dot projector (the parts are textureless).
+- Generator (`--stereo`, see `configs/generator/bending_pipe_stereo_*.json`):
+  rectified right camera at the baseline along camera +x, spot-light dot
+  projector between the cameras (gobo node tree, perspective-correct mapping),
+  L/R rendered grayscale at low samples with **denoising off** - render noise
+  plays the role of sensor noise. GT stays raycast-perfect and pixel-aligned.
+- `scripts/stereo_depth_postprocess.py`: OpenCV StereoSGBM (full 8-direction
+  `hh` mode) on each pair -> 1/16-px disparity -> metric depth written into
+  `sensor_data.npz` as `depth_m` (raycast kept as `depth_gt_m`). Separate pass,
+  so SGBM can be retuned without re-rendering.
+- Framing matters: the SGM dead band (max disparity = fx*b/z_min ~ 325 px) is
+  why the real rig frames the bin right-of-center; the stereo presets shift the
+  camera the same way.
+- Material matters: the real pipes are bright shiny metal; presets use
+  metallic 0.9 / roughness 0.3 so highlights and grazing surfaces break the
+  matching exactly where the real camera drops points.
+
+Smoke validation vs real: valid fraction 47% (real 36-70%), SGM-vs-GT error
+median ~2 mm with edge fattening and crossing-shadow dropout in the same
+places the real frames lose points. Floor measurement note: the real tote
+floor is *flat* (residual std 0.27-1.0 mm, a gentle ~6 mm bow, no molded ribs) -
+the "ribs" in the intensity image are printed texture. So SGM ripple, not rib
+geometry, is what the floor rejection has to survive, and the stereo sim
+provides it natively.
