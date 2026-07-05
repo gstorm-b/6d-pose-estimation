@@ -1,0 +1,85 @@
+# Wave-4 pilot: fine-tune on active-stereo (SGM) simulated data - Route A.
+#
+# The dataset root holds samples whose depth_m came from OpenCV SGBM on
+# rendered stereo pairs (scripts/stereo_depth_postprocess.py), so correlated
+# ripple / edge fattening / specular dropout are already in the data. The P8
+# statistical noise terms are OFF (stacking them would double-count sensor
+# artifacts); only the conservative jitter + z-rotation remain. Fine-tune from
+# the wave-3 best checkpoint (--init-checkpoint) and measure transfer on
+# real-data/bending_real with NO real frames in training.
+seed: 7
+
+dataset:
+  root: processed-data/pointnet2_semseg_bending_pipe_wave4_mixed_pilot
+  normalize: scene_center
+  min_points_per_instance: 16
+  augment:
+    enabled: true
+    # conservative geometric/sensor jitter
+    xyz_jitter_std: 0.0005
+    xyz_jitter_clip: 0.002
+    depth_noise_std: 0.0007
+    point_dropout_prob: 0.03
+    outlier_ratio: 0.002
+    outlier_std: 0.015
+    normal_jitter_std: 0.02
+    random_z_rotation: true
+    # structured-light sim-to-real noise (P8), tuned to the Basler captures
+    # (36-70% valid pixels, ripple ~1 mm at 0.6 m, big specular holes)
+    depth_quadratic_noise: 0.0       # along-ray std ~1.4 mm at 0.6 m
+    depth_quantization_m: 0.0        # 1 mm depth quantization
+    incidence_dropout_max_prob: 0.0   # grazing surfaces lose up to 35% of points
+    incidence_dropout_power: 3.0
+    edge_dropout_prob: 0.0            # shadowing near depth discontinuities
+    edge_dropout_neighbors: 8
+    edge_dropout_gap_m: 0.005
+    blob_dropout_count: 0              # specular dropout holes
+    blob_dropout_radius_m: 0.012
+    camera_fallback_standoff_m: 0.6
+
+model:
+  name: pointnet2_instance_seg
+  num_classes: 2
+  input_features: xyz_normal
+  ops_backend: pytorch3d
+  sa_npoints: [1024, 256, 64]
+  sa_nsamples: [32, 32, 32]
+  dropout: 0.0
+  embedding_dim: 8
+
+loss:
+  semantic_weight: 1.0
+  offset_weight: 10.0
+  embedding_weight: 0.0
+  offset_smooth_l1_beta: 0.01
+  delta_var: 0.5
+  delta_dist: 1.5
+  regularization_weight: 0.001
+  min_points_per_instance: 16
+  centroid_distance_weighting: false
+  centroid_distance_weight_min: 0.5
+  centroid_distance_weight_max: 1.5
+
+inference:
+  object_probability_threshold: 0.5
+  scene_subsample: voxel
+  scene_voxel_size_m: 0.002
+  dbscan_eps_m: 0.006
+  dbscan_eps_sweep_m: [0.004, 0.005, 0.006, 0.007, 0.008, 0.010, 0.012]
+  dbscan_min_samples: 8
+  min_cluster_points: 32
+
+metrics:
+  instance_iou_threshold: 0.5
+  ignore_gt_instances_below_points: 32
+  merge_split_overlap_threshold: 0.1
+
+train:
+  seed: 7
+  device: cuda
+  num_workers: 0
+  epochs: 20
+  batch_size: 1
+  learning_rate: 0.0003
+  weight_decay: 0.0001
+  class_weight_mode: auto

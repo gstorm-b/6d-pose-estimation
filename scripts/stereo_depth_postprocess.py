@@ -68,6 +68,13 @@ def process_sample(sample_dir: Path, args: argparse.Namespace) -> dict | None:
     matcher, disp_min, num_disp = build_matcher(fx, baseline, args)
     disparity = matcher.compute(left, right)  # int16, 1/16 px
 
+    # The real camera's SGM stack rejects low-confidence speckle; without this
+    # the synthetic cloud keeps garbage matches spread across the whole search
+    # range (measured: 0.65 m z-span vs 0.13 m in the real clouds). filterSpeckles
+    # works in fixed-point disparity units, hence the *16.
+    if args.speckle_size > 0:
+        cv2.filterSpeckles(disparity, 0, int(args.speckle_size), int(args.speckle_diff_px * 16))
+
     valid = disparity > (disp_min * 16)
     depth = np.zeros(disparity.shape, dtype=np.float32)
     with np.errstate(divide="ignore"):
@@ -122,6 +129,10 @@ def main() -> int:
     parser.add_argument("--disp12-max-diff", type=int, default=1)
     parser.add_argument("--mode", choices=("sgbm3way", "hh"), default="hh",
                         help="hh = full 8-direction SGM (closest to the camera), sgbm3way = faster.")
+    parser.add_argument("--speckle-size", type=int, default=400,
+                        help="Remove connected disparity blobs smaller than this (px). 0 = off.")
+    parser.add_argument("--speckle-diff-px", type=float, default=2.0,
+                        help="Disparity continuity threshold (px) for the speckle filter.")
     parser.add_argument("--stats-only", action="store_true", help="Report stats without rewriting npz files.")
     args = parser.parse_args()
 
