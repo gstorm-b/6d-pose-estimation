@@ -202,3 +202,29 @@ floor is *flat* (residual std 0.27-1.0 mm, a gentle ~6 mm bow, no molded ribs) -
 the "ribs" in the intensity image are printed texture. So SGM ripple, not rib
 geometry, is what the floor rejection has to survive, and the stereo sim
 provides it natively.
+
+### Wave-4 results (197 SGM samples mixed with wave-3, zero real frames)
+
+Three data defects were caught by cheap pilots before the full run (each fixed
+without re-rendering thanks to the separate SGBM pass): flying pixels must be
+relabeled background (`flying_pixel_tolerance_m`), the scene needs a table
+plane outside the bin (otherwise SGM hallucinates ~100k garbage matches on the
+empty world), and the disparity needs `cv2.filterSpeckles` like the real
+camera's stack (z-span 0.65 -> 0.24 m, p90 error 33 -> 10-15 mm). SGM-only
+fine-tuning collapses (catastrophic forgetting); SGM mixed with the wave-3
+raycast set is stable.
+
+On the real captures the SGM mix lifts semantic discrimination with no real
+data at all - AUC pipe-vs-floor 0.76 (wave-3) -> 0.83-0.85, pipes p50 ~1.0 -
+matching what the wave-3b real-label fine-tune achieved. But it plateaus
+there: the real tote floor stays at p50 ~0.91 (only real pseudo-labels have
+driven it to ~0.001), tripling SGM data did not move it, and the center-voting
+head still merges neighbouring real pipes under every training recipe tried.
+No synthetic regression (wave-3 test IoU 0.982, instance recall 0.93).
+
+**Standing conclusions:** (1) the production pipeline stays geometric
+candidates + crest-split instances + learned semantic gate; (2) the highest-
+value next train is wave-4b = wave-3 + SGM + the ~200 real pseudo-label
+samples in one run (SGM robustness + real floor calibration); (3) pile
+instance-splitting needs a clustering rework - the discriminative embedding
+head exists in the model but has never been trained (`embedding_weight: 0`).
