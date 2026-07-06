@@ -1,0 +1,13 @@
+{
+  "cx": 611.5000133264095,
+  "cy": 511.500002625338,
+  "fit_rmse_u_px": 0.0,
+  "fit_rmse_v_px": 0.0,
+  "flip_z": true,
+  "fx": 1465.5900238545844,
+  "fy": 1465.5900181886796,
+  "height": 1024,
+  "in_mm": true,
+  "source_pcd": "real-data\\bending\\STA-100-547M-082609-W-40645229-0001-points_intensity.pcd",
+  "width": 1224
+}

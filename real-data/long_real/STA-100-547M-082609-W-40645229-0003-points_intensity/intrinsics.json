@@ -1,0 +1,13 @@
+{
+  "cx": 611.500015815747,
+  "cy": 511.50000162998987,
+  "fit_rmse_u_px": 0.0,
+  "fit_rmse_v_px": 0.0,
+  "flip_z": true,
+  "fx": 1465.5900055470424,
+  "fy": 1465.5900167924347,
+  "height": 1024,
+  "in_mm": true,
+  "source_pcd": "real-data\\long\\STA-100-547M-082609-W-40645229-0003-points_intensity.pcd",
+  "width": 1224
+}

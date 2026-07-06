@@ -1,0 +1,77 @@
+{
+  "crop": "none",
+  "mean_foreground_fraction": 0.0577,
+  "mean_instance_count": 4.4,
+  "method": "classical",
+  "n_frames": 5,
+  "per_frame": [
+    {
+      "foreground_fraction": 0.0089,
+      "frame": "STA-100-547M-082609-W-40645229-0000-points_intensity",
+      "instance_count": 6,
+      "instance_sizes": [
+        5555,
+        812,
+        582,
+        415,
+        231,
+        210
+      ],
+      "points_in": 876182,
+      "points_segmented": 876182
+    },
+    {
+      "foreground_fraction": 0.0039,
+      "frame": "STA-100-547M-082609-W-40645229-0001-points_intensity",
+      "instance_count": 1,
+      "instance_sizes": [
+        3335
+      ],
+      "points_in": 846756,
+      "points_segmented": 846756
+    },
+    {
+      "foreground_fraction": 0.1318,
+      "frame": "STA-100-547M-082609-W-40645229-0002-points_intensity",
+      "instance_count": 6,
+      "instance_sizes": [
+        85319,
+        23726,
+        1990,
+        830,
+        333,
+        235
+      ],
+      "points_in": 853108,
+      "points_segmented": 853108
+    },
+    {
+      "foreground_fraction": 0.0507,
+      "frame": "STA-100-547M-082609-W-40645229-0003-points_intensity",
+      "instance_count": 3,
+      "instance_sizes": [
+        18333,
+        15420,
+        9016
+      ],
+      "points_in": 843257,
+      "points_segmented": 843257
+    },
+    {
+      "foreground_fraction": 0.093,
+      "frame": "STA-100-547M-082609-W-40645229-0004-points_intensity",
+      "instance_count": 6,
+      "instance_sizes": [
+        33916,
+        18805,
+        10056,
+        9190,
+        3993,
+        593
+      ],
+      "points_in": 823415,
+      "points_segmented": 823415
+    }
+  ],
+  "set": "real-data\\long_real"
+}

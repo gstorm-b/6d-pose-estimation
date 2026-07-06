@@ -1,0 +1,68 @@
+{
+  "crop": "none",
+  "mean_foreground_fraction": 0.1915,
+  "mean_instance_count": 44.5,
+  "method": "classical",
+  "n_frames": 2,
+  "per_frame": [
+    {
+      "foreground_fraction": 0.2127,
+      "frame": "STA-100-547M-082609-W-40645229-0022-points_intensity",
+      "instance_count": 49,
+      "instance_sizes": [
+        39922,
+        17487,
+        13004,
+        9095,
+        8738,
+        5728,
+        5611,
+        4265,
+        4045,
+        3651,
+        3529,
+        2729,
+        2584,
+        2563,
+        2295,
+        2189,
+        2181,
+        2175,
+        1758,
+        1452
+      ],
+      "points_in": 707268,
+      "points_segmented": 707268
+    },
+    {
+      "foreground_fraction": 0.1702,
+      "frame": "STA-100-547M-082609-W-40645229-0023-points_intensity",
+      "instance_count": 40,
+      "instance_sizes": [
+        13312,
+        12325,
+        12029,
+        10168,
+        7372,
+        7109,
+        5451,
+        5310,
+        5284,
+        4326,
+        3827,
+        3039,
+        3000,
+        2927,
+        2852,
+        2662,
+        2451,
+        2411,
+        1756,
+        1739
+      ],
+      "points_in": 708572,
+      "points_segmented": 708572
+    }
+  ],
+  "set": "real-data\\curve_real"
+}

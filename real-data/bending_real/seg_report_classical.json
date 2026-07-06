@@ -1,0 +1,112 @@
+{
+  "crop": "none",
+  "mean_foreground_fraction": 0.1709,
+  "mean_instance_count": 8.0,
+  "method": "classical",
+  "n_frames": 6,
+  "per_frame": [
+    {
+      "foreground_fraction": 0.2199,
+      "frame": "STA-100-547M-082609-W-40645229-0000-points_intensity",
+      "instance_count": 8,
+      "instance_sizes": [
+        17732,
+        17433,
+        16541,
+        16059,
+        15511,
+        15360,
+        14941,
+        1552
+      ],
+      "points_in": 523622,
+      "points_segmented": 523622
+    },
+    {
+      "foreground_fraction": 0.1244,
+      "frame": "STA-100-547M-082609-W-40645229-0001-points_intensity",
+      "instance_count": 9,
+      "instance_sizes": [
+        21525,
+        16415,
+        12347,
+        10959,
+        10646,
+        7002,
+        6654,
+        6348,
+        3406
+      ],
+      "points_in": 766148,
+      "points_segmented": 766148
+    },
+    {
+      "foreground_fraction": 0.2062,
+      "frame": "STA-100-547M-082609-W-40645229-0002-points_intensity",
+      "instance_count": 9,
+      "instance_sizes": [
+        20863,
+        16389,
+        13060,
+        12898,
+        10709,
+        9014,
+        8623,
+        6375,
+        5059
+      ],
+      "points_in": 499356,
+      "points_segmented": 499356
+    },
+    {
+      "foreground_fraction": 0.113,
+      "frame": "STA-100-547M-082609-W-40645229-0003-points_intensity",
+      "instance_count": 3,
+      "instance_sizes": [
+        47660,
+        8141,
+        2772
+      ],
+      "points_in": 518212,
+      "points_segmented": 518212
+    },
+    {
+      "foreground_fraction": 0.2811,
+      "frame": "STA-100-547M-082609-W-40645229-0004-points_intensity",
+      "instance_count": 12,
+      "instance_sizes": [
+        43947,
+        30301,
+        17996,
+        15280,
+        13286,
+        7664,
+        1283,
+        807,
+        598,
+        527,
+        258,
+        177
+      ],
+      "points_in": 470023,
+      "points_segmented": 470023
+    },
+    {
+      "foreground_fraction": 0.0808,
+      "frame": "STA-100-547M-082609-W-40645229-0005-points_intensity",
+      "instance_count": 7,
+      "instance_sizes": [
+        11048,
+        9917,
+        5555,
+        3601,
+        3093,
+        2292,
+        1462
+      ],
+      "points_in": 457353,
+      "points_segmented": 457353
+    }
+  ],
+  "set": "real-data\\bending_real"
+}
